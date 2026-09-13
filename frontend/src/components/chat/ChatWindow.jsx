@@ -532,7 +532,12 @@ export default function ChatWindow() {
             }}
             className="hover:scale-[1.02] hover:border-[var(--pragna-gold-soft)]"
           >
-            <span>{MODEL_TIERS?.find((t) => t.id === selectedModel)?.label || 'Praxis'}</span>
+            <span>
+              {(() => {
+                const t = MODEL_TIERS?.find((item) => item.id === selectedModel);
+                return t ? `${t.label} (${t.sanskrit})` : 'Tvarā (त्वरा)';
+              })()}
+            </span>
             <span style={{ fontSize: '10px', opacity: 0.7 }}>▾</span>
           </button>
 
@@ -543,7 +548,7 @@ export default function ChatWindow() {
                 top: '100%',
                 right: 0,
                 marginTop: '8px',
-                width: '260px',
+                width: '280px',
                 background: 'var(--pragna-surface-elevated, #1A1A1E)',
                 border: '1px solid var(--pragna-border)',
                 borderRadius: '14px',
@@ -554,7 +559,7 @@ export default function ChatWindow() {
               }}
             >
               <div style={{ padding: '6px 10px', fontSize: '10.5px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--pragna-text-muted)' }}>
-                Mimir Model Engine Tier
+                Pragna Model Intelligence Engine
               </div>
               {MODEL_TIERS?.map((tier) => {
                 const isSelected = selectedModel === tier.id;
@@ -583,14 +588,14 @@ export default function ChatWindow() {
                   >
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
                       <span style={{ fontSize: '12.5px', fontWeight: 650, color: isSelected ? 'var(--pragna-gold-soft)' : 'var(--pragna-text)' }}>
-                        {tier.label}
+                        {tier.label} ({tier.sanskrit}) · <span style={{ opacity: 0.8, fontWeight: 400, fontSize: '11.5px' }}>{tier.englishLabel}</span>
                       </span>
                       <span style={{ fontSize: '10px', color: 'var(--pragna-text-muted)', fontFamily: 'monospace' }}>
                         {tier.tier.split(':')[0]}
                       </span>
                     </div>
                     <span style={{ fontSize: '11px', color: 'var(--pragna-text-muted)', marginTop: '2px' }}>
-                      {tier.desc}
+                      {tier.meaning ? `"${tier.meaning}" — ` : ''}{tier.desc}
                     </span>
                   </button>
                 );

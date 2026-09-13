@@ -28,6 +28,9 @@ frontend/.env
 .qodo/
 .DS_Store
 Thumbs.db
+.next/
+*.local
+tsconfig.tsbuildinfo
 
 # Root scripts & deploy files
 DEPLOY.md

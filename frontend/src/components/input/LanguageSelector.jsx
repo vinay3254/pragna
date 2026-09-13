@@ -20,7 +20,7 @@ export default function LanguageSelector() {
             value={item.code} 
             style={{ backgroundColor: "#1e1e1e", color: "#ffffff" }}
           >
-            {item.label}
+            {item.nativeName && item.nativeName !== item.label ? `${item.nativeName} (${item.label})` : item.label}
           </option>
         ))}
       </select>

@@ -948,6 +948,9 @@ export default function MessageBubble({ message, language = "en", onRetry, onEdi
       audioRef.current.currentTime = 0;
       audioRef.current = null;
     }
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
     if (speakIntervalRef.current) {
       clearInterval(speakIntervalRef.current);
       speakIntervalRef.current = null;
@@ -955,92 +958,101 @@ export default function MessageBubble({ message, language = "en", onRetry, onEdi
     setSpeaking(false);
   };
 
-  const speakText = () => {
-    const textToSpeak = (effectiveText || message.text || "").trim();
-    if (!textToSpeak) {
-      console.warn("No text to speak");
+  const speakWithBrowserSynthesis = (text, targetLang) => {
+    if (typeof window === "undefined" || !window.speechSynthesis) {
+      setSpeaking(false);
       return;
     }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    const bcpTag = LANG_TAG[targetLang] || `${targetLang}-IN` || "en-US";
+    utterance.lang = bcpTag;
+    utterance.rate = 1.0;
+    utterance.pitch = 1.05;
 
-    // Toggle off if already speaking
+    const voices = window.speechSynthesis.getVoices();
+    const matchedVoice = voices.find(v =>
+      (v.lang === bcpTag || v.lang.startsWith(targetLang)) &&
+      (v.name.toLowerCase().includes("female") || v.name.toLowerCase().includes("natural") || v.name.toLowerCase().includes("online"))
+    ) || voices.find(v => v.lang === bcpTag || v.lang.startsWith(targetLang)) || voices.find(v => v.lang.includes("en-IN"));
+
+    if (matchedVoice) {
+      utterance.voice = matchedVoice;
+    }
+
+    utterance.onstart = () => setSpeaking(true);
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const speakText = () => {
+    // First click speaks, second click stops
     if (speaking) {
       stopSpeaking();
       return;
     }
 
+    const rawText = (effectiveText || message.text || "").trim();
+    const textToSpeak = cleanTextForSpeech(rawText);
+    if (!textToSpeak) {
+      console.warn("No text to speak");
+      return;
+    }
+
     try {
       setSpeaking(true);
-
       const targetLang = language || "en";
 
-      // Call backend to generate speech (backend handles Google TTS silently)
-      const requestBody = {
-        text: textToSpeak,
-        language: targetLang
-      };
-
-      console.log(`Requesting speech from backend | Language: ${targetLang} | Text: ${textToSpeak.substring(0, 50)}...`);
-
-      // Fetch audio from backend
       fetch(`${API_BASE}/api/speech`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(requestBody)
+        body: JSON.stringify({
+          text: textToSpeak,
+          language: targetLang,
+        })
       })
         .then(response => {
-          console.log(`Backend response status: ${response.status} for language: ${targetLang}`);
           if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
           }
           return response.blob();
         })
         .then(audioBlob => {
-          console.log(`Audio blob received | size: ${audioBlob.size} bytes | type: ${audioBlob.type}`);
-          // Create object URL for the blob
+          if (!audioBlob || audioBlob.size === 0) {
+            throw new Error("Empty audio blob");
+          }
           const audioUrl = URL.createObjectURL(audioBlob);
-
-          // Create and play audio
           const audio = new Audio(audioUrl);
           audioRef.current = audio;
 
-          // Set up event handlers
-          audio.onplay = () => {
-            setSpeaking(true);
-            console.log("Audio playback started");
-          };
-
+          audio.onplay = () => setSpeaking(true);
           audio.onended = () => {
             setSpeaking(false);
-            URL.revokeObjectURL(audioUrl);  // Clean up object URL
-            audioRef.current = null;
-            console.log("Audio playback finished");
-          };
-
-          audio.onerror = (e) => {
-            console.error("Audio playback error:", e);
-            setSpeaking(false);
             URL.revokeObjectURL(audioUrl);
             audioRef.current = null;
           };
-
-          // Play the audio
-          audio.play().catch((err) => {
-            console.error("Error playing audio:", err);
-            setSpeaking(false);
+          audio.onerror = () => {
             URL.revokeObjectURL(audioUrl);
             audioRef.current = null;
+            speakWithBrowserSynthesis(textToSpeak, targetLang);
+          };
+
+          audio.play().catch(() => {
+            URL.revokeObjectURL(audioUrl);
+            audioRef.current = null;
+            speakWithBrowserSynthesis(textToSpeak, targetLang);
           });
         })
-        .catch(err => {
-          console.error("Error getting speech from backend:", err);
-          setSpeaking(false);
+        .catch(() => {
+          speakWithBrowserSynthesis(textToSpeak, targetLang);
         });
 
     } catch (err) {
       console.error("Error in speakText:", err);
-      setSpeaking(false);
+      speakWithBrowserSynthesis(textToSpeak, language || "en");
     }
   };
 
@@ -1524,8 +1536,8 @@ export default function MessageBubble({ message, language = "en", onRetry, onEdi
               <button
                 type="button"
                 onClick={speakText}
-                title="Read aloud"
-                className={`${actionBtnBase} ${speaking ? "text-accent-400" : "text-[color:var(--pragna-text-muted)]"}`}
+                title={speaking ? "Stop speaking" : "Read aloud"}
+                className={`${actionBtnBase} ${speaking ? "text-accent-400 bg-accent-500/15 ring-1 ring-accent-400/40 animate-pulse" : "text-[color:var(--pragna-text-muted)]"}`}
               >
                 <VoiceIcon />
               </button>

@@ -83,12 +83,64 @@ GROUNDED_SYSTEM_PROMPT_TEMPLATE = (
 _UNSET = object()
 
 
-def _build_system_prompt(sources: list[dict], user_memories: list[str]) -> str:
+MODEL_KNOWLEDGE = {
+    "gemma4:cloud": {
+        "displayName": "Tvarā",
+        "sanskrit": "त्वरा",
+        "meaning": "speed",
+        "tier": "Tier 1: Implementation / Praxis",
+        "architecture": "Google Gemma 4 Cloud",
+        "strengths": "Instant response, fast routine coding, concise reasoning, and interactive tools.",
+    },
+    "gemma4:31b-cloud": {
+        "displayName": "Manas",
+        "sanskrit": "मनस्",
+        "meaning": "intellect / mind",
+        "tier": "Tier 2: Testing & QA / Rhapsody",
+        "architecture": "Google Gemma 4 31B Cloud",
+        "strengths": "Deep multi-step reasoning, comprehensive explanations, and thorough QA verification.",
+    },
+    "nemotron-3-super:cloud": {
+        "displayName": "Bṛhat",
+        "sanskrit": "बृहत्",
+        "meaning": "vast / immense",
+        "tier": "Tier 3: Review / Elenchos",
+        "architecture": "NVIDIA Nemotron 3 Super Cloud (120B)",
+        "strengths": "Vast scale analytical reasoning, security audits, and deep code review.",
+    },
+    "minimax-m3:cloud": {
+        "displayName": "Pragya",
+        "sanskrit": "प्रज्ञा",
+        "meaning": "deep wisdom",
+        "tier": "Tier 4: Architecture / Theoria",
+        "architecture": "MiniMax M3 Cloud",
+        "strengths": "High-level architectural planning, long-context document synthesis, and system design.",
+    },
+}
+
+
+def _build_system_prompt(sources: list[dict], user_memories: list[str], model: str | None = None) -> str:
     if sources:
         context = "\n---\n".join(f"[{s['filename']}]: {s['snippet']}" for s in sources)
         system_prompt = GROUNDED_SYSTEM_PROMPT_TEMPLATE.format(context=context)
     else:
         system_prompt = GENERAL_SYSTEM_PROMPT
+
+    if model and model in MODEL_KNOWLEDGE:
+        m = MODEL_KNOWLEDGE[model]
+        model_block = (
+            f"ACTIVE MODEL AWARENESS:\n"
+            f"- Model Name: {m['displayName']} ({m['sanskrit']})\n"
+            f"- Sanskrit Meaning: '{m['meaning']}'\n"
+            f"- Tier / Label: {m['tier']}\n"
+            f"- Underlying Architecture: {m['architecture']}\n"
+            f"- Core Strengths: {m['strengths']}\n"
+            f"If the user asks what model you are using, what model is active, or asks about your AI engine, "
+            f"explain clearly that you are running on {m['displayName']} ({m['sanskrit']}), describe its meaning "
+            f"('{m['meaning']}'), its underlying architecture ({m['architecture']}), and its specific role in Pragna. "
+            f"Never claim to be an unknown or generic model.\n\n"
+        )
+        system_prompt = model_block + system_prompt
 
     if user_memories:
         memory_block = "What you know about this user:\n" + "\n".join(f"- {m}" for m in user_memories) + "\n\n"
@@ -159,6 +211,7 @@ async def _build_ollama_messages(
     conn, collection, settings, memories_collection, query_text: str, parent_id: int | None,
     document_ids: list[int] | None = None,
     user_id: int | None = None,
+    model: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
     top_k = 6
     threshold = settings.rag_similarity_threshold
@@ -206,7 +259,7 @@ async def _build_ollama_messages(
     )
 
     # Build system prompt with context_sources (may include forced fallback)
-    system_prompt = _build_system_prompt(context_sources, user_memories)
+    system_prompt = _build_system_prompt(context_sources, user_memories, model=model)
 
     history = repository.get_path_to_root(conn, parent_id) if parent_id is not None else []
     ollama_messages = [{"role": "system", "content": system_prompt}]
@@ -490,6 +543,7 @@ async def generate_reply(
         conn, collection, settings, memories_collection, query_text, parent_id,
         document_ids=document_ids,
         user_id=user_id,
+        model=model,
     )
 
     # `async for` over a delegate generator doesn't forward athrow/aclose the

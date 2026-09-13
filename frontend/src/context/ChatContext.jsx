@@ -4,10 +4,10 @@ import { listPersonas, sendOrchestratedMessageStream } from "../api/api";
 import ChatManagementAPI from "../api/chatManagement";
 
 export const MODEL_TIERS = [
-  { id: "gemma4:cloud", label: "Praxis", tier: "Tier 1: Implementation", desc: "Fast routine coding & reasoning" },
-  { id: "gemma4:31b-cloud", label: "Rhapsody", tier: "Tier 2: Testing & QA", desc: "Deep multi-step reasoning" },
-  { id: "nemotron-3-super:cloud", label: "Elenchos", tier: "Tier 3: Review", desc: "Security & code review" },
-  { id: "minimax-m3:cloud", label: "Theoria", tier: "Tier 4: Architecture", desc: "Planning & system design" },
+  { id: "gemma4:cloud", label: "Tvarā", englishLabel: "Praxis", sanskrit: "त्वरा", meaning: "speed", tier: "Tier 1: Implementation", desc: "Fast routine coding & rapid reasoning" },
+  { id: "gemma4:31b-cloud", label: "Manas", englishLabel: "Rhapsody", sanskrit: "मनस्", meaning: "intellect", tier: "Tier 2: Testing & QA", desc: "Deep multi-step reasoning & QA" },
+  { id: "nemotron-3-super:cloud", label: "Bṛhat", englishLabel: "Elenchos", sanskrit: "बृहत्", meaning: "vast", tier: "Tier 3: Review", desc: "Security audit & 120B analytical review" },
+  { id: "minimax-m3:cloud", label: "Pragya", englishLabel: "Theoria", sanskrit: "प्रज्ञा", meaning: "deep wisdom", tier: "Tier 4: Architecture", desc: "System architecture & long synthesis" },
 ];
 
 export const ChatContext = createContext({});
