@@ -15,7 +15,7 @@ def _backend_base_url(request: Request) -> str:
     settings = request.app.state.settings
     return (
         settings.backend_public_url
-        or f"{request.url.scheme}://{request.url.netloc}"
+        or "https://pragna-p7ij.onrender.com"
     )
 
 
@@ -26,7 +26,7 @@ def _frontend_base_url(request: Request) -> str:
     cookie_frontend = request.cookies.get(FRONTEND_COOKIE_NAME)
     if cookie_frontend:
         return cookie_frontend.rstrip("/")
-    return "http://localhost:4028"
+    return "https://frontend-mcce.onrender.com"
 
 
 def _provider_credentials(request: Request, provider: str) -> tuple[str, str]:
@@ -63,10 +63,14 @@ async def oauth_login(request: Request, provider: str):
         if parsed.scheme and parsed.netloc:
             frontend_origin = f"{parsed.scheme}://{parsed.netloc}"
 
+    is_secure = (
+        request.headers.get("x-forwarded-proto") == "https"
+        or request.url.scheme == "https"
+    )
     response = RedirectResponse(authorize_url)
-    response.set_cookie(STATE_COOKIE_NAME, state, httponly=True, max_age=600, samesite="lax")
+    response.set_cookie(STATE_COOKIE_NAME, state, httponly=True, max_age=600, samesite="lax", secure=is_secure)
     if frontend_origin:
-        response.set_cookie(FRONTEND_COOKIE_NAME, frontend_origin, httponly=True, max_age=600, samesite="lax")
+        response.set_cookie(FRONTEND_COOKIE_NAME, frontend_origin, httponly=True, max_age=600, samesite="lax", secure=is_secure)
     return response
 
 

@@ -49,58 +49,63 @@ const nextConfig = {
     return config;
   },
   async rewrites() {
+    const backendUrl =
+      process.env.NEXT_PUBLIC_API_BASE ||
+      process.env.NEXT_PUBLIC_API_BASE_URL ||
+      'https://pragna-p7ij.onrender.com';
+
     return [
       {
         source: '/api/conversations/:path*',
-        destination: 'http://localhost:8000/api/conversations/:path*',
+        destination: `${backendUrl}/api/conversations/:path*`,
       },
       {
         source: '/api/documents/:path*',
-        destination: 'http://localhost:8000/api/documents/:path*',
+        destination: `${backendUrl}/api/documents/:path*`,
       },
       {
         source: '/api/memories/:path*',
-        destination: 'http://localhost:8000/api/memories/:path*',
+        destination: `${backendUrl}/api/memories/:path*`,
       },
       {
         source: '/api/voice/:path*',
-        destination: 'http://localhost:8000/api/voice/:path*',
+        destination: `${backendUrl}/api/voice/:path*`,
       },
       {
         source: '/api/artifacts/:path*',
-        destination: 'http://localhost:8000/api/artifacts/:path*',
+        destination: `${backendUrl}/api/artifacts/:path*`,
       },
       {
         source: '/api/tools/:path*',
-        destination: 'http://localhost:8000/api/tools/:path*',
+        destination: `${backendUrl}/api/tools/:path*`,
       },
       {
         source: '/api/scheduled-tasks/:path*',
-        destination: 'http://localhost:8000/api/scheduled-tasks/:path*',
+        destination: `${backendUrl}/api/scheduled-tasks/:path*`,
       },
       {
         source: '/api/system/:path*',
-        destination: 'http://localhost:8000/api/system/:path*',
+        destination: `${backendUrl}/api/system/:path*`,
       },
       {
         source: '/api/agent/:path*',
-        destination: 'http://localhost:8000/api/agent/:path*',
+        destination: `${backendUrl}/api/agent/:path*`,
       },
       {
         source: '/api/messages/:path*',
-        destination: 'http://localhost:8000/api/messages/:path*',
+        destination: `${backendUrl}/api/messages/:path*`,
       },
       {
         source: '/api/auth/:path*',
-        destination: 'http://localhost:8000/api/auth/:path*',
+        destination: `${backendUrl}/api/auth/:path*`,
       },
       {
         source: '/api/chat/:path+',
-        destination: 'http://localhost:8000/api/chat/:path*',
+        destination: `${backendUrl}/api/chat/:path*`,
       },
       {
         source: '/api/share/:path*',
-        destination: 'http://localhost:8000/api/share/:path*',
+        destination: `${backendUrl}/api/share/:path*`,
       },
     ];
   },

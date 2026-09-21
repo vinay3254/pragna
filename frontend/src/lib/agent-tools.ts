@@ -6,6 +6,11 @@ import { callMcpTool, isMcpToolName } from './mcpClient';
 
 const execAsync = promisify(exec);
 
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_API_BASE ||
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  'https://pragna-p7ij.onrender.com';
+
 // A tool that created a file returns download_url like "/generated_docs/foo.docx".
 // If the model echoes that string back as `path` for an edit/read/export call,
 // path.resolve() would treat the leading slash as filesystem-root-absolute — map
@@ -1311,7 +1316,7 @@ async function performWebSearch(rawQuery: string): Promise<any> {
 
   // 1. Try backend high-fidelity search (powered by Brave Search API)
   try {
-    const backendRes = await fetch('http://localhost:8000/api/tools/search', {
+    const backendRes = await fetch(`${BACKEND_URL}/api/tools/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
@@ -1457,11 +1462,11 @@ async function performWebExtract(rawUrl: string): Promise<any> {
 }
 
 /**
- * Proxy helper for browser & backend tools when backend on port 8000 is available
+ * Proxy helper for browser & backend tools when backend is available
  */
 async function proxyToBackend(endpoint: string, payload: Record<string, any>): Promise<any> {
   try {
-    const res = await fetch(`http://localhost:8000${endpoint}`, {
+    const res = await fetch(`${BACKEND_URL}${endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1490,7 +1495,7 @@ async function proxyToBackendAuthed(
     const method = opts.method || 'POST';
     const headers: Record<string, string> = { Authorization: `Bearer ${opts.authToken}` };
     if (payload) headers['Content-Type'] = 'application/json';
-    const res = await fetch(`http://localhost:8000${endpoint}`, {
+    const res = await fetch(`${BACKEND_URL}${endpoint}`, {
       method,
       headers,
       body: payload ? JSON.stringify(payload) : undefined,

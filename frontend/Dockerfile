@@ -7,7 +7,7 @@ FROM node:20-slim AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-ARG NEXT_PUBLIC_API_BASE=http://localhost:8000
+ARG NEXT_PUBLIC_API_BASE=https://pragna-p7ij.onrender.com
 ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
 RUN npm run build
 

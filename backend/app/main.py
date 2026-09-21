@@ -49,7 +49,7 @@ def _cors_origins(settings: Settings) -> list[str]:
     if settings.frontend_public_url and settings.frontend_public_url not in parts:
         parts.append(settings.frontend_public_url)
     if not parts:
-        parts = ["http://localhost:5173", "http://localhost:5180", "http://localhost:4028", "http://localhost:3000"]
+        parts = ["https://frontend-mcce.onrender.com", "http://localhost:5173", "http://localhost:5180", "http://localhost:4028", "http://localhost:3000"]
     return parts
 
 

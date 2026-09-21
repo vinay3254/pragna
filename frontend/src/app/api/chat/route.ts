@@ -10,6 +10,15 @@ import * as path from 'node:path';
 export const runtime = 'nodejs';
 export const maxDuration = 120;
 
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_API_BASE ||
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  'https://pragna-p7ij.onrender.com';
+
+const FRONTEND_URL =
+  process.env.FRONTEND_PUBLIC_URL ||
+  'https://frontend-mcce.onrender.com';
+
 // Map UI model IDs to reliable OpenRouter model slugs
 const MODEL_MAP: Record<string, string> = {
   'claude-sonnet-4-5': 'anthropic/claude-sonnet-4.5',
@@ -205,7 +214,7 @@ function loadMemoriesSync(): { userName: string; userNickname: string; memories:
 // Async: refresh backend SQLite memories into the file cache (runs in background after response starts)
 async function refreshMemoriesFromBackend(): Promise<void> {
   try {
-    const res = await fetch('http://localhost:8000/api/memories', {
+    const res = await fetch(`${BACKEND_URL}/api/memories`, {
       headers: { 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(1500),
     });
@@ -386,7 +395,7 @@ function updateMemoriesFromMessage(content: string, currentUserName?: string) {
 
     // Sync new facts to backend SQLite asynchronously
     for (const fact of newFactsToSync) {
-      fetch('http://localhost:8000/api/memories', {
+      fetch(`${BACKEND_URL}/api/memories`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: fact }),
@@ -699,7 +708,7 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
     // and require inline [n] citations back to them.
     if (Array.isArray(sourceDocumentIds) && sourceDocumentIds.length > 0 && lastUserMessage) {
       try {
-        const ragRes = await fetch('http://localhost:8000/api/tools/rag_search', {
+        const ragRes = await fetch(`${BACKEND_URL}/api/tools/rag_search`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: lastUserMessage, document_ids: sourceDocumentIds, top_k: 6 }),
@@ -884,7 +893,7 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
                   headers: {
                     Authorization: `Bearer ${authBearer}`,
                     'Content-Type': 'application/json',
-                    'HTTP-Referer': 'http://localhost:4028',
+                    'HTTP-Referer': FRONTEND_URL,
                     'X-Title': 'ClaudeChat',
                   },
                   body: JSON.stringify({
@@ -911,7 +920,7 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
                       headers: {
                         Authorization: `Bearer ${authBearer}`,
                         'Content-Type': 'application/json',
-                        'HTTP-Referer': 'http://localhost:4028',
+                        'HTTP-Referer': FRONTEND_URL,
                         'X-Title': 'ClaudeChat',
                       },
                       body: JSON.stringify({
@@ -942,7 +951,7 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
                       headers: {
                         Authorization: `Bearer ${openRouterKey}`,
                         'Content-Type': 'application/json',
-                        'HTTP-Referer': 'http://localhost:4028',
+                        'HTTP-Referer': FRONTEND_URL,
                         'X-Title': 'ClaudeChat',
                       },
                       body: JSON.stringify({
@@ -965,7 +974,7 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
                       headers: {
                         Authorization: `Bearer ${authBearer}`,
                         'Content-Type': 'application/json',
-                        'HTTP-Referer': 'http://localhost:4028',
+                        'HTTP-Referer': FRONTEND_URL,
                         'X-Title': 'ClaudeChat',
                       },
                       body: JSON.stringify({

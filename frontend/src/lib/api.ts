@@ -1,7 +1,7 @@
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ??
   process.env.NEXT_PUBLIC_API_BASE_URL ??
-  '';
+  'https://pragna-p7ij.onrender.com';
 
 const TOKEN_STORAGE_KEY = 'argus-auth-token';
 let authToken: string | null =

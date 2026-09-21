@@ -8,6 +8,11 @@ import * as os from 'os';
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_API_BASE ||
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  'https://pragna-p7ij.onrender.com';
+
 const execFileAsync = promisify(execFile);
 
 // Mapping from language code to recommended Microsoft Edge Neural voice
@@ -166,11 +171,11 @@ export async function POST(req: NextRequest) {
     const targetLang = prepared.detectedLang;
     const googleLang = prepared.googleLang;
 
-    // ── Tier 1: FastAPI Backend (if running on port 8000) ───────────────────
+    // ── Tier 1: FastAPI Backend ───────────────────
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1800);
-      const backendRes = await fetch('http://localhost:8000/api/voice/tts', {
+      const backendRes = await fetch(`${BACKEND_URL}/api/voice/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: textSnippet, voice: targetVoice, language: targetLang }),

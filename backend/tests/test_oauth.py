@@ -203,7 +203,7 @@ def test_oauth_callback_creates_new_user_and_redirects_with_token(test_settings)
 
         assert callback_res.status_code in (302, 307)
         location = callback_res.headers["location"]
-        assert location.startswith("http://localhost:4028/auth/callback#token=")
+        assert location.startswith("https://frontend-mcce.onrender.com/auth/callback#token=")
 
         user = repository.get_user_by_email(conn, "newuser@example.com")
         assert user is not None

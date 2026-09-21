@@ -105,14 +105,13 @@ class Settings(BaseSettings):
         return keys
 
     # Public URLs of THIS backend and the frontend. Used to build OAuth
-    # callback URLs and to set the right CORS allow-list. When unset, the
-    # app falls back to localhost defaults so local dev keeps working.
-    backend_public_url: str | None = None
-    frontend_public_url: str | None = None
+    # callback URLs and to set the right CORS allow-list. Defaults to Render
+    # production URLs while still accepting overrides via env vars.
+    backend_public_url: str | None = "https://pragna-p7ij.onrender.com"
+    frontend_public_url: str | None = "https://frontend-mcce.onrender.com"
 
-    # CORS allow-list. Comma-separated. When unset, falls back to the two
-    # local-dev origins.
-    cors_allow_origins: str | None = None
+    # CORS allow-list. Comma-separated.
+    cors_allow_origins: str | None = "https://frontend-mcce.onrender.com,http://localhost:4028,http://localhost:3000,http://localhost:5173,http://localhost:5180"
 
 
 @lru_cache
