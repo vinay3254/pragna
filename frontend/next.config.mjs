@@ -1,5 +1,7 @@
 import { imageHosts } from './image-hosts.config.mjs';
 
+const BACKEND_URL = (process.env.BACKEND_URL || 'http://localhost:8000').replace(/\/+$/, '');
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   productionBrowserSourceMaps: false,
@@ -52,27 +54,27 @@ const nextConfig = {
     return [
       {
         source: '/api/conversations/:path*',
-        destination: 'http://localhost:8000/api/conversations/:path*',
+        destination: `${BACKEND_URL}/api/conversations/:path*`,
       },
       {
         source: '/api/documents/:path*',
-        destination: 'http://localhost:8000/api/documents/:path*',
+        destination: `${BACKEND_URL}/api/documents/:path*`,
       },
       {
         source: '/api/memories/:path*',
-        destination: 'http://localhost:8000/api/memories/:path*',
+        destination: `${BACKEND_URL}/api/memories/:path*`,
       },
       {
         source: '/api/voice/:path*',
-        destination: 'http://localhost:8000/api/voice/:path*',
+        destination: `${BACKEND_URL}/api/voice/:path*`,
       },
       {
         source: '/api/artifacts/:path*',
-        destination: 'http://localhost:8000/api/artifacts/:path*',
+        destination: `${BACKEND_URL}/api/artifacts/:path*`,
       },
       {
         source: '/api/tools/:path*',
-        destination: 'http://localhost:8000/api/tools/:path*',
+        destination: `${BACKEND_URL}/api/tools/:path*`,
       },
       {
         source: '/api/scheduled-tasks/:path*',
@@ -80,27 +82,27 @@ const nextConfig = {
       },
       {
         source: '/api/system/:path*',
-        destination: 'http://localhost:8000/api/system/:path*',
+        destination: `${BACKEND_URL}/api/system/:path*`,
       },
       {
         source: '/api/agent/:path*',
-        destination: 'http://localhost:8000/api/agent/:path*',
+        destination: `${BACKEND_URL}/api/agent/:path*`,
       },
       {
         source: '/api/messages/:path*',
-        destination: 'http://localhost:8000/api/messages/:path*',
+        destination: `${BACKEND_URL}/api/messages/:path*`,
       },
       {
         source: '/api/auth/:path*',
-        destination: 'http://localhost:8000/api/auth/:path*',
+        destination: `${BACKEND_URL}/api/auth/:path*`,
       },
       {
         source: '/api/chat/:path+',
-        destination: 'http://localhost:8000/api/chat/:path*',
+        destination: `${BACKEND_URL}/api/chat/:path*`,
       },
       {
         source: '/api/share/:path*',
-        destination: 'http://localhost:8000/api/share/:path*',
+        destination: `${BACKEND_URL}/api/share/:path*`,
       },
     ];
   },

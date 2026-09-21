@@ -6,6 +6,8 @@ import { callMcpTool, isMcpToolName } from './mcpClient';
 
 const execAsync = promisify(exec);
 
+const BACKEND_URL = (process.env.BACKEND_URL || 'http://localhost:8000').replace(/\/+$/, '');
+
 // A tool that created a file returns download_url like "/generated_docs/foo.docx".
 // If the model echoes that string back as `path` for an edit/read/export call,
 // path.resolve() would treat the leading slash as filesystem-root-absolute — map
@@ -1311,7 +1313,7 @@ async function performWebSearch(rawQuery: string): Promise<any> {
 
   // 1. Try backend high-fidelity search (powered by Brave Search API)
   try {
-    const backendRes = await fetch('http://localhost:8000/api/tools/search', {
+    const backendRes = await fetch(`${BACKEND_URL}/api/tools/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
@@ -1319,10 +1321,17 @@ async function performWebSearch(rawQuery: string): Promise<any> {
     });
     if (backendRes.ok) {
       const data = await backendRes.json();
-      if (data.success && Array.isArray(data.results) && data.results.length > 0) {
+      if (
+        data.success &&
+        data.provider !== 'placeholder' &&
+        Array.isArray(data.results) &&
+        data.results.length > 0 &&
+        !data.results.every((r: any) => !r.snippet || r.snippet.startsWith("Results for '") || r.snippet.startsWith("Search completed for"))
+      ) {
         return {
           success: true,
           query,
+          provider: data.provider || 'brave',
           count: data.results.length,
           results: data.results,
           summary: `Found ${data.results.length} live search results for "${query}"`,
@@ -1372,11 +1381,14 @@ async function performWebSearch(rawQuery: string): Promise<any> {
         const snippetRegex = /<a class="result__snippet[^>]*>([\s\S]*?)<\/a>/g;
         let sMatch;
         while ((sMatch = snippetRegex.exec(html)) !== null && results.length < 8) {
-          results.push({
-            title: `Result ${results.length + 1}`,
-            snippet: sMatch[1].replace(/<[^>]+>/g, '').trim(),
-            url: `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
-          });
+          const snippet = sMatch[1].replace(/<[^>]+>/g, '').trim();
+          if (snippet) {
+            results.push({
+              title: `Result ${results.length + 1}`,
+              snippet,
+              url: `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
+            });
+          }
         }
       }
 
@@ -1384,6 +1396,7 @@ async function performWebSearch(rawQuery: string): Promise<any> {
         return {
           success: true,
           query,
+          provider: 'duckduckgo',
           count: results.length,
           results,
           summary: `Found ${results.length} live search results for "${query}"`,
@@ -1395,16 +1408,13 @@ async function performWebSearch(rawQuery: string): Promise<any> {
   }
 
   return {
-    success: true,
+    success: false,
     query,
-    results: [
-      {
-        title: query,
-        snippet: `Search completed for "${query}".`,
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
-      },
-    ],
-    summary: `Search completed for "${query}"`,
+    provider: 'placeholder',
+    count: 0,
+    results: [],
+    error: `Live search returned no results for "${query}".`,
+    summary: `Live search returned no results for "${query}".`,
   };
 }
 
@@ -1461,7 +1471,7 @@ async function performWebExtract(rawUrl: string): Promise<any> {
  */
 async function proxyToBackend(endpoint: string, payload: Record<string, any>): Promise<any> {
   try {
-    const res = await fetch(`http://localhost:8000${endpoint}`, {
+    const res = await fetch(`${BACKEND_URL}${endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1490,7 +1500,7 @@ async function proxyToBackendAuthed(
     const method = opts.method || 'POST';
     const headers: Record<string, string> = { Authorization: `Bearer ${opts.authToken}` };
     if (payload) headers['Content-Type'] = 'application/json';
-    const res = await fetch(`http://localhost:8000${endpoint}`, {
+    const res = await fetch(`${BACKEND_URL}${endpoint}`, {
       method,
       headers,
       body: payload ? JSON.stringify(payload) : undefined,

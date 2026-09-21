@@ -772,7 +772,9 @@ async def perform_web_search(query: str) -> dict[str, Any]:
                             "url": item.get("url"),
                             "snippet": item.get("description")
                         })
-                    return {"success": True, "query": query, "results": results}
+                    if results:
+                        logger.info("Web search answered by provider: brave for query '%s'", query)
+                        return {"success": True, "query": query, "provider": "brave", "results": results}
         except Exception as e:
             logger.warning(f"Brave search API failed: {e}")
 
@@ -799,13 +801,16 @@ async def perform_web_search(query: str) -> dict[str, Any]:
                             "snippet": snippet_elem.get_text(strip=True) if snippet_elem else ""
                         })
                 if results:
-                    return {"success": True, "query": query, "results": results}
+                    logger.info("Web search answered by provider: duckduckgo for query '%s'", query)
+                    return {"success": True, "query": query, "provider": "duckduckgo", "results": results}
     except Exception as e:
         logger.warning(f"DuckDuckGo search fallback failed: {e}")
 
+    logger.info("Web search answered by provider: placeholder for query '%s'", query)
     return {
         "success": True,
         "query": query,
+        "provider": "placeholder",
         "results": [{"title": f"Search: {query}", "url": f"https://duckduckgo.com/?q={query}", "snippet": f"Results for '{query}'."}]
     }
 

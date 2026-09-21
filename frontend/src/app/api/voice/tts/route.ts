@@ -10,6 +10,8 @@ export const maxDuration = 60;
 
 const execFileAsync = promisify(execFile);
 
+const BACKEND_URL = (process.env.BACKEND_URL || 'http://localhost:8000').replace(/\/+$/, '');
+
 // Mapping from language code to recommended Microsoft Edge Neural voice
 const VOICE_MAP: Record<string, string> = {
   hi: 'hi-IN-SwaraNeural',
@@ -170,7 +172,7 @@ export async function POST(req: NextRequest) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1800);
-      const backendRes = await fetch('http://localhost:8000/api/voice/tts', {
+      const backendRes = await fetch(`${BACKEND_URL}/api/voice/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: textSnippet, voice: targetVoice, language: targetLang }),

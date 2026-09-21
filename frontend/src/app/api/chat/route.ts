@@ -10,6 +10,8 @@ import * as path from 'node:path';
 export const runtime = 'nodejs';
 export const maxDuration = 120;
 
+const BACKEND_URL = (process.env.BACKEND_URL || 'http://localhost:8000').replace(/\/+$/, '');
+
 // Map UI model IDs to reliable OpenRouter model slugs
 const MODEL_MAP: Record<string, string> = {
   'claude-sonnet-4-5': 'anthropic/claude-sonnet-4.5',
@@ -205,7 +207,7 @@ function loadMemoriesSync(): { userName: string; userNickname: string; memories:
 // Async: refresh backend SQLite memories into the file cache (runs in background after response starts)
 async function refreshMemoriesFromBackend(): Promise<void> {
   try {
-    const res = await fetch('http://localhost:8000/api/memories', {
+    const res = await fetch(`${BACKEND_URL}/api/memories`, {
       headers: { 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(1500),
     });
@@ -386,7 +388,7 @@ function updateMemoriesFromMessage(content: string, currentUserName?: string) {
 
     // Sync new facts to backend SQLite asynchronously
     for (const fact of newFactsToSync) {
-      fetch('http://localhost:8000/api/memories', {
+      fetch(`${BACKEND_URL}/api/memories`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: fact }),
@@ -459,7 +461,7 @@ function mapOmnirouteModel(model: string): string {
   }
 }
 
-async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: string; resultsText: string } | null> {
+async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: string; resultsText: string; failed: boolean } | null> {
   if (!messages || messages.length === 0) return null;
   const lastMsg = (messages[messages.length - 1]?.content || '').trim();
   if (!lastMsg) return null;
@@ -479,7 +481,7 @@ async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: stri
   // 4. Check for explicit search intent, URLs, or time-sensitive real-world queries
   const urlMatch = lastMsg.match(/https?:\/\/[^\s]+/i);
   const hasExplicitSearch = /\b(search for|search|google|browse to|look up|check online|find online|web search)\b/i.test(lastMsg);
-  const isTimeSensitive = /\b(latest|current|recently|recent|today|tonight|yesterday|this week|this month|this year|2025|2026|newest|breaking news|stock price|weather|election|who won|who is the current|prime minister|president of|release date|openaii?|astra|gpt-?6|deepseek v[34]|claude [45]|gemini [23])\b/i.test(lastMsg);
+  const isTimeSensitive = /\b(latest|current|recently|recent|today|tonight|yesterday|this week|this month|this year|2025|2026|newest|breaking news|news|update|version|released|release date|weather|election|who won|who\s+(?:is|was|are|were|'s)\s+the|chief minister|cm of|pm of|ceo of|prime minister|president of|governor|minister|mayor|captain|coach|champion|winner|score|results|rank|price|stock price|exchange rate|net worth|population|openaii?|astra|gpt-?6|deepseek v[34]|claude [45]|gemini [23])\b/i.test(lastMsg);
 
   if (!urlMatch && !hasExplicitSearch && !isTimeSensitive) {
     return null;
@@ -523,21 +525,30 @@ async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: stri
     }
   }
 
-  if (!query || query.length < 3) return null;
+  if (!query || query.length < 2) return null;
 
   try {
     const searchRes = await executeTool('web_search', { query });
-    if (searchRes && Array.isArray(searchRes.results) && searchRes.results.length > 0) {
+    const hasValidResults =
+      searchRes &&
+      searchRes.success &&
+      Array.isArray(searchRes.results) &&
+      searchRes.results.length > 0 &&
+      searchRes.provider !== 'placeholder' &&
+      !searchRes.results.every((r: any) => !r.snippet || r.snippet.startsWith("Results for '") || r.snippet.startsWith("Search completed for"));
+
+    if (hasValidResults) {
       const topResults = searchRes.results.slice(0, 5);
       const resultsText = topResults
         .map((r: any, idx: number) => `[${idx + 1}] ${r.title}\n${r.snippet || ''}\nURL: ${r.url}`)
         .join('\n\n');
-      return { query, resultsText };
+      return { query, resultsText, failed: false };
     }
+    return { query, resultsText: '', failed: true };
   } catch (err) {
     console.warn('Auto search execution failed:', err);
+    return { query, resultsText: '', failed: true };
   }
-  return null;
 }
 
 export async function POST(req: NextRequest) {
@@ -688,10 +699,17 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
     // Real-time automatic web search resolution
     const autoSearch = await detectAndExecuteWebSearch(messages);
     if (autoSearch) {
-      conversationHistory.push({
-        role: 'system',
-        content: `[VERIFIED REAL-TIME LIVE SEARCH RESULTS for "${autoSearch.query}"]:\n${autoSearch.resultsText}\n\nINSTRUCTION: Answer the user's inquiry directly, accurately, and honestly using these real-time search results. State the facts clearly without preamble or unnecessary disclaimers.`,
-      });
+      if (autoSearch.failed || !autoSearch.resultsText) {
+        conversationHistory.push({
+          role: 'system',
+          content: `[REAL-TIME LIVE SEARCH FAILED for "${autoSearch.query}"]:\nLive web search could not retrieve current real-time results for this query.\n\nCRITICAL INSTRUCTION: You must inform the user clearly and directly that live web search failed or returned no results for "${autoSearch.query}". Do NOT attempt to answer from your pre-trained memory as if it were current, and do not present outdated information as current facts. State plainly that live search was unavailable and you cannot verify the latest current information.`,
+        });
+      } else {
+        conversationHistory.push({
+          role: 'system',
+          content: `[VERIFIED REAL-TIME LIVE SEARCH RESULTS for "${autoSearch.query}"]:\n${autoSearch.resultsText}\n\nINSTRUCTION: Answer the user's inquiry directly, accurately, and honestly using these real-time search results. State the facts clearly without preamble or unnecessary disclaimers. If the search results conflict with your own pre-trained memory or knowledge cutoff, the search results win.`,
+        });
+      }
     }
 
     // Source-grounded retrieval (NotebookLM-style): if the user attached
@@ -699,7 +717,7 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
     // and require inline [n] citations back to them.
     if (Array.isArray(sourceDocumentIds) && sourceDocumentIds.length > 0 && lastUserMessage) {
       try {
-        const ragRes = await fetch('http://localhost:8000/api/tools/rag_search', {
+        const ragRes = await fetch(`${BACKEND_URL}/api/tools/rag_search`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: lastUserMessage, document_ids: sourceDocumentIds, top_k: 6 }),

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useMemo } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import AppLayout from '@/components/AppLayout';
 import { getAuthToken } from '@/lib/api';
@@ -24,6 +25,7 @@ import {
   RotateCcw,
   Sparkles,
   ArrowRight,
+  ArrowLeft,
   SlidersHorizontal,
   Bell,
   MessageSquare
@@ -304,6 +306,17 @@ export default function ScheduledTasksPage() {
       <div className="flex-1 flex flex-col h-full overflow-y-auto bg-background text-foreground selection:bg-[#d4af37]/25">
         {/* Main Container */}
         <div className="max-w-4xl w-full mx-auto px-6 py-10 sm:py-14 flex flex-col flex-1">
+          {/* Back to chats button */}
+          <div className="mb-6">
+            <Link
+              href="/"
+              className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-card/70 hover:bg-muted text-muted-foreground hover:text-foreground text-xs font-medium border border-border/80 hover:border-border transition-all shadow-xs group"
+            >
+              <ArrowLeft size={14} className="group-hover:-translate-x-0.5 transition-transform text-[#d4af37]" />
+              <span>Back to chats</span>
+            </Link>
+          </div>
+
           {/* Header section matching Pragna Theme */}
           <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-10">
             <div>
