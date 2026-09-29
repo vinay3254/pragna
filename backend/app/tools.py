@@ -1,9 +1,11 @@
 import os
+import asyncio
 import logging
 import httpx
 import json
 import subprocess
 import shutil
+import urllib.parse
 from pathlib import Path
 from typing import Any
 from bs4 import BeautifulSoup
@@ -752,65 +754,131 @@ OLLAMA_TOOLS_SCHEMA = [
 _TODO_LIST: list[str] = []
 
 
-async def perform_web_search(query: str) -> dict[str, Any]:
-    api_key = os.getenv("BRAVE_SEARCH_API_KEY")
-    if api_key:
+def _clean_ddg_url(raw_url: str) -> str:
+    if not raw_url:
+        return ""
+    if "uddg=" in raw_url:
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
-                    params={"q": query, "count": 5},
-                    timeout=10.0
+            parsed = urllib.parse.urlparse(raw_url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "uddg" in qs:
+                return qs["uddg"][0]
+        except Exception:
+            pass
+    if raw_url.startswith("//"):
+        return "https:" + raw_url
+    return raw_url
+
+
+async def perform_web_search(query: str) -> dict[str, Any]:
+    query = query.strip()
+    if not query:
+        return {
+            "success": False,
+            "query": query,
+            "provider": None,
+            "error": "Search query cannot be empty.",
+        }
+
+    browser_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    # ── 1. Primary: ddgs package ──────────────────────────────────────────
+    for attempt in range(2):
+        try:
+            def _fetch_ddgs():
+                from ddgs import DDGS
+                with DDGS() as ddgs:
+                    return list(ddgs.text(query, max_results=5))
+
+            raw_results = await asyncio.to_thread(_fetch_ddgs)
+            results = []
+            for item in raw_results:
+                title = (item.get("title") or "").strip()
+                url = (item.get("href") or "").strip()
+                snippet = (item.get("body") or "").strip()
+                if title and (url or snippet):
+                    results.append({"title": title, "url": url, "snippet": snippet})
+
+            if results:
+                logger.info("Web search answered by provider: ddgs for query '%s'", query)
+                return {"success": True, "query": query, "provider": "ddgs", "results": results}
+        except Exception as e:
+            logger.warning("ddgs search attempt %d failed for query '%s': %s", attempt + 1, query, e)
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+
+    # ── 2. Fallback 1: BeautifulSoup DuckDuckGo HTML scrape ───────────────
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=8.0) as client:
+                resp = await client.post(
+                    "https://html.duckduckgo.com/html/",
+                    data={"q": query},
+                    headers=browser_headers,
                 )
                 if resp.status_code == 200:
-                    data = resp.json()
+                    soup = BeautifulSoup(resp.text, "html.parser")
                     results = []
-                    for item in data.get("web", {}).get("results", [])[:5]:
-                        results.append({
-                            "title": item.get("title"),
-                            "url": item.get("url"),
-                            "snippet": item.get("description")
-                        })
+                    for res_div in soup.find_all("div", class_="result__body")[:5]:
+                        title_elem = res_div.find("a", class_="result__a") or res_div.find("a", class_="result__url")
+                        snippet_elem = res_div.find("a", class_="result__snippet")
+                        url_elem = res_div.find("a", class_="result__url") or title_elem
+                        title = title_elem.get_text(strip=True) if title_elem else ""
+                        raw_href = url_elem.get("href", "") if url_elem else ""
+                        snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+                        if title or snippet:
+                            results.append({
+                                "title": title or "Search Result",
+                                "url": _clean_ddg_url(raw_href),
+                                "snippet": snippet,
+                            })
                     if results:
-                        logger.info("Web search answered by provider: brave for query '%s'", query)
-                        return {"success": True, "query": query, "provider": "brave", "results": results}
+                        logger.info("Web search answered by provider: duckduckgo-html for query '%s'", query)
+                        return {"success": True, "query": query, "provider": "duckduckgo-html", "results": results}
         except Exception as e:
-            logger.warning(f"Brave search API failed: {e}")
+            logger.warning("duckduckgo-html attempt %d failed for query '%s': %s", attempt + 1, query, e)
+            if attempt == 0:
+                await asyncio.sleep(1.0)
 
-    # Fallback to DuckDuckGo HTML search
-    try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            resp = await client.post(
-                "https://html.duckduckgo.com/html/",
-                data={"q": query},
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-                timeout=3.5
-            )
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                results = []
-                title_links = soup.find_all("a", class_="result__a")
-                snippet_elems = soup.find_all("a", class_="result__snippet")
-                for i, title_elem in enumerate(title_links[:5]):
-                    snippet_elem = snippet_elems[i] if i < len(snippet_elems) else None
-                    results.append({
-                        "title": title_elem.get_text(strip=True),
-                        "url": title_elem.get("href", "").strip(),
-                        "snippet": snippet_elem.get_text(strip=True) if snippet_elem else ""
-                    })
-                if results:
-                    logger.info("Web search answered by provider: duckduckgo for query '%s'", query)
-                    return {"success": True, "query": query, "provider": "duckduckgo", "results": results}
-    except Exception as e:
-        logger.warning(f"DuckDuckGo search fallback failed: {e}")
+    # ── 3. Fallback 2: DuckDuckGo Lite (lite.duckduckgo.com/lite/) ─────────
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=8.0) as client:
+                resp = await client.post(
+                    "https://lite.duckduckgo.com/lite/",
+                    data={"q": query},
+                    headers={**browser_headers, "Referer": "https://lite.duckduckgo.com/"},
+                )
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    links = soup.find_all("a", class_="result-link")
+                    snippets = soup.find_all("td", class_="result-snippet")
+                    results = []
+                    for i, link in enumerate(links[:5]):
+                        title = link.get_text(strip=True)
+                        href = _clean_ddg_url(link.get("href", ""))
+                        snippet = snippets[i].get_text(strip=True) if i < len(snippets) else ""
+                        if title and (href or snippet):
+                            results.append({"title": title, "url": href, "snippet": snippet})
+                    if results:
+                        logger.info("Web search answered by provider: duckduckgo-lite for query '%s'", query)
+                        return {"success": True, "query": query, "provider": "duckduckgo-lite", "results": results}
+        except Exception as e:
+            logger.warning("duckduckgo-lite attempt %d failed for query '%s': %s", attempt + 1, query, e)
+            if attempt == 0:
+                await asyncio.sleep(1.0)
 
-    logger.info("Web search answered by provider: placeholder for query '%s'", query)
+    # ── All providers failed ──────────────────────────────────────────────
+    logger.warning("All web search providers failed for query '%s'", query)
     return {
-        "success": True,
+        "success": False,
         "query": query,
-        "provider": "placeholder",
-        "results": [{"title": f"Search: {query}", "url": f"https://duckduckgo.com/?q={query}", "snippet": f"Results for '{query}'."}]
+        "provider": None,
+        "error": "Live web search is temporarily unavailable, all providers failed.",
     }
 
 

@@ -104,6 +104,10 @@ const nextConfig = {
         source: '/api/share/:path*',
         destination: `${BACKEND_URL}/api/share/:path*`,
       },
+      {
+        source: '/api/billing/:path*',
+        destination: `${BACKEND_URL}/api/billing/:path*`,
+      },
     ];
   },
 };

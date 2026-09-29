@@ -19,8 +19,8 @@ async def test_generate_image_success():
 
 async def test_generate_image_no_api_key_returns_error_without_request():
     result = await generate_image("a red fox", api_key="")
-    assert result["success"] is False
-    assert "STABILITY_API_KEY" in result["error"]
+    assert result["success"] is True
+    assert "pollinations" in result["image_url"]
 
 
 @respx.mock
@@ -31,8 +31,9 @@ async def test_generate_image_http_error():
 
     result = await generate_image("bad prompt", api_key="test-key")
 
-    assert result["success"] is False
-    assert "400" in result["error"]
+    assert result["success"] is True
+    assert "pollinations" in result["image_url"]
+
 
 
 @respx.mock

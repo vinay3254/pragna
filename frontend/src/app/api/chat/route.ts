@@ -63,6 +63,7 @@ Voice, Tone & Personality (PRAGNA 1-A Standard):
     - NEVER state or imply that you cannot generate or render images.
     - NEVER suggest external tools like Midjourney or DALL-E instead of producing the image.
     - ALWAYS present the generated image directly using markdown image syntax: ![Descriptive Title](image_url).
+    - After generate_image succeeds, include the returned \`markdown\` value verbatim in the reply so the image displays; if it fails, tell the user the exact error.
 - Document Download Links: Document tools (create_word_document, create_pdf_document, create_spreadsheet, create_presentation) return a \`download_url\` field — ALWAYS use that exact value verbatim as the link target: [Download DocumentName.ext](download_url). Never invent or guess a different link path.
 - Editing Existing Files: If the user asks to change, add to, or fix a document/spreadsheet/presentation you already created in this conversation, call the matching edit_* tool (edit_word_document, edit_spreadsheet) with \`path\` set to the exact \`download_url\` string that the earlier create_* tool result returned — do not create a new file for an edit request.
 - Diagrams: When generating architectural or flow diagrams, use Mermaid blocks (\`\`\`mermaid).
@@ -338,75 +339,13 @@ async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: stri
   if (!messages || messages.length === 0) return null;
   const lastMsg = (messages[messages.length - 1]?.content || '').trim();
   if (!lastMsg) return null;
-  const lower = lastMsg.toLowerCase();
 
-  // 1. Skip pure greetings and conversational pleasantries
-  const isGreeting = /^(hi|hello|hey|greetings|good morning|good evening|good afternoon|howdy|sup|thanks|thank you|bye|goodbye|ok|okay)[!.? ]*$/i.test(lastMsg);
-  if (isGreeting) return null;
-
-  // 2. Skip image generation requests (do not waste time searching web for images)
-  const isImageRequest = /\b(generate|create|draw|make|render|paint|produce|give me|show me)\b.*\b(image|picture|photo|illustration|drawing|painting|artwork|graphic|portrait|wallpaper|sketch)\b/i.test(lastMsg)
-    || /\b(image|picture|photo|illustration|drawing|painting)\s+of\b/i.test(lastMsg)
-    || /^draw\s+/i.test(lastMsg);
-  if (isImageRequest) return null;
-
-  // Plain date/time questions are answered from the live clock in the system prompt, not from search results.
-  if (/^\W*(what('s|s| is| was)?|tell me)\s+(the\s+)?(current\s+|today'?s?\s+)?(date|time|day)(\s+and\s+(date|time|day))?(\s+(now|today|right now))?\W*$/i.test(lastMsg)) return null;
-
-  // 3. Skip pure arithmetic
-  if (/^what is \d+[\s+\-*/^]+\d+/i.test(lastMsg) || /^calculate /i.test(lastMsg)) return null;
-
-  // 4. Skip pure generic coding requests that have NO real-world entity, model, or product names
-  const isPureGenericCoding = /^(write|create|implement|give me|show me)\s+(a\s+)?(python|javascript|typescript|c\+\+|java|rust|go|html|css|sql|function|script|algorithm|regex|class)\s+(to\s+|for\s+)?(reverse|sort|find|sum|calculate|loop|print|check|validate)\b/i.test(lastMsg);
-  if (isPureGenericCoding) return null;
-
-  // 4. Auto-search runs for every remaining message (greetings, arithmetic, date/time and pure
-  // generic coding are skipped above). A URL in the message is searched as-is.
-  const urlMatch = lastMsg.match(/https?:\/\/[^\s]+/i);
-
-  let query = '';
-
-  if (urlMatch) {
-    // If the message is a URL or contains a URL, search for that exact URL or page
-    query = urlMatch[0];
-  } else {
-    // Clean query of conversational prefixes
-    query = lastMsg
-      .replace(/\b(dont u know|don't you know|did you know|can you|could you|please|use search|search for|search|google it|google|look up|tell me about|tell me|who is|what is|why is)\b/gi, ' ')
-      .replace(/[?!,.:;"]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    // Check if query has pronouns or is a short follow-up: enrich with earlier subjects
-    const hasPronouns = /\b(he|him|his|she|her|they|them|their|it|its|that|this|the actor|the politician|the model|the company|the quote|the statement)\b/i.test(lastMsg);
-    if (hasPronouns || query.split(' ').length <= 4 || messages.length > 2) {
-      const priorUserMessages = messages
-        .slice(0, -1)
-        .filter((m: any) => m.role === 'user')
-        .map((m: any) => m.content)
-        .join(' ');
-
-      const priorClean = priorUserMessages
-        .replace(/\b(hi|hello|who is|what is|tell me|about|and|famous|for|dont u know|did you know|use search)\b/gi, ' ')
-        .replace(/[?!,.:;"]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      if (priorClean) {
-        const priorWords = priorClean.split(/\s+/).filter(w => w.length > 3);
-        const missingWords = priorWords.filter(w => !lower.includes(w.toLowerCase()));
-        if (missingWords.length > 0) {
-          query = `${missingWords.slice(0, 3).join(' ')} ${query}`.trim();
-        }
-      }
-    }
-  }
-
-  query = query.slice(0, 200);
-  if (!query || query.length < 3) return null;
+  // Real-time live search runs on every user chat query
+  let query = lastMsg.slice(0, 200).trim();
+  if (!query) return null;
 
   try {
-    const searchRes = await executeTool('web_search', { query });
+    let searchRes = await executeTool('web_search', { query });
     if (searchRes && Array.isArray(searchRes.results) && searchRes.results.length > 0) {
       const topResults = searchRes.results.slice(0, 8);
       const resultsText = topResults
@@ -414,6 +353,25 @@ async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: stri
         .join('\n\n');
       return { query, resultsText, failed: false };
     }
+
+    // Try a cleaned query if the exact message returned no results
+    const cleanQuery = lastMsg
+      .replace(/[?!,.:;"]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 200);
+
+    if (cleanQuery && cleanQuery !== query) {
+      searchRes = await executeTool('web_search', { query: cleanQuery });
+      if (searchRes && Array.isArray(searchRes.results) && searchRes.results.length > 0) {
+        const topResults = searchRes.results.slice(0, 8);
+        const resultsText = topResults
+          .map((r: any, idx: number) => `[${idx + 1}] ${r.title}\n${r.snippet || ''}\nURL: ${r.url}`)
+          .join('\n\n');
+        return { query: cleanQuery, resultsText, failed: false };
+      }
+    }
+
     return { query, resultsText: '', failed: true };
   } catch (err) {
     console.warn('Auto search execution failed:', err);
@@ -457,16 +415,86 @@ async function detectAndExecuteImageGeneration(messages: any[]): Promise<{ promp
 
   try {
     const res = await executeTool('image_generate', { prompt, aspect_ratio: aspectRatio });
-    if (res && res.imageUrl) {
+    const imgUrl = res?.image_url || res?.imageUrl;
+    if (res && res.success && imgUrl) {
       return {
         prompt,
-        imageUrl: res.imageUrl,
-        markdown: `![${prompt}](${res.imageUrl})`,
+        imageUrl: imgUrl,
+        markdown: res.markdown || `![${prompt}](${imgUrl})`,
       };
     }
   } catch (err) {
     console.warn('detectAndExecuteImageGeneration error:', err);
   }
+  return null;
+}
+
+async function detectAndExecuteDocumentGeneration(messages: any[]): Promise<{ title: string; format: string; downloadUrl: string; filename: string } | null> {
+  if (!messages || messages.length === 0) return null;
+  const lastMsg = (messages[messages.length - 1]?.content || '').trim();
+  if (!lastMsg) return null;
+
+  // Detect requested format
+  let format: 'pdf' | 'docx' | 'xlsx' | 'pptx' | null = null;
+  if (/\b(pdf|to pdf|as pdf|in pdf|into pdf|pdf format|pdf file|pdf document)\b/i.test(lastMsg)) format = 'pdf';
+  else if (/\b(word|docx|doc|word document|word format|docx format|to docx|as docx)\b/i.test(lastMsg)) format = 'docx';
+  else if (/\b(excel|spreadsheet|xlsx|csv|sheets|to excel|as excel|excel format)\b/i.test(lastMsg)) format = 'xlsx';
+  else if (/\b(powerpoint|presentation|slides|pptx|deck|slide deck|to pptx|as pptx)\b/i.test(lastMsg)) format = 'pptx';
+
+  if (!format) return null;
+
+  // Check if this is a document generation/conversion request
+  const isDocRequest =
+    /\b(change|convert|export|format|generate|create|make|download|save|produce|turn|give me|render|switch|provide)\b/i.test(lastMsg) ||
+    /^(to|as|into|in)\s+(pdf|docx|word|excel|pptx|presentation|spreadsheet)/i.test(lastMsg) ||
+    /\b(in|as|into|to)\s+(pdf|docx|word|excel|spreadsheet|presentation|pptx)\s*(format|file|document)?\b/i.test(lastMsg);
+
+  if (!isDocRequest) return null;
+
+  // Determine content & title:
+  let content = '';
+  let title = 'Executive Document';
+
+  const priorAssistantMsg = [...messages]
+    .slice(0, -1)
+    .reverse()
+    .find((m: any) => m.role === 'assistant')?.content || '';
+
+  if (lastMsg.length < 90 && priorAssistantMsg) {
+    content = priorAssistantMsg;
+    const headingMatch = priorAssistantMsg.match(/^#+\s*(.+)$/m) || priorAssistantMsg.match(/\*\*([^*]+)\*\*/);
+    if (headingMatch) title = headingMatch[1].trim();
+    else title = 'Generated Document';
+  } else {
+    content = lastMsg;
+    title = lastMsg
+      .replace(/\b(can you|could you|please|kindly|generate me|generate|create me|create|make me|make|export|download|change|convert|in|to|as|pdf|docx|word|excel|spreadsheet|presentation|pptx|format|file|document)\b/gi, ' ')
+      .replace(/[?!,.:;"]/g, ' ')
+      .trim()
+      .slice(0, 40) || 'Document';
+  }
+
+  try {
+    let toolName = 'create_pdf_document';
+    if (format === 'docx') toolName = 'create_word_document';
+    else if (format === 'xlsx') toolName = 'create_spreadsheet';
+    else if (format === 'pptx') toolName = 'create_presentation';
+
+    const res = await executeTool(toolName, { title, content, format });
+    if (res && res.success && res.download_url) {
+      const cleanTitle = title.replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'Document';
+      const filename = `${cleanTitle}.${format}`;
+      return {
+        title,
+        format,
+        downloadUrl: res.download_url,
+        filename,
+      };
+    }
+  } catch (err) {
+    console.warn('detectAndExecuteDocumentGeneration error:', err);
+  }
+
   return null;
 }
 
@@ -625,7 +653,12 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
       } else {
         conversationHistory.push({
           role: 'system',
-          content: `[LIVE WEB SEARCH RESULTS for "${autoSearch.query}"]:\n${autoSearch.resultsText}\n\nINSTRUCTION: Answer the user's inquiry directly, accurately, and honestly using these real-time search results. State the facts clearly without preamble or unnecessary disclaimers.\nThe results can disagree because some pages are outdated. When they conflict, trust the result that gives the most recent explicit date (for example "assumed office on June 3, 2026") over generic or list pages that only say "current" or "latest". Today is ${new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full' })}. If any result reports a change of office or a newer event, the older claim is outdated: report the newer one and do not mention the outdated one as current.`,
+          content: `[LIVE REAL-TIME WEB SEARCH RESULTS for "${autoSearch.query}"]:\n${autoSearch.resultsText}\n\nCRITICAL MANDATORY INSTRUCTIONS:
+- You have active internet access via real-time live search.
+- The results above reflect the current live facts as of today (${new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full' })}).
+- You MUST answer the user's inquiry directly, truthfully, and accurately based on these live real-time search results.
+- NEVER contradict these live search results with outdated information from your base pre-training weights.
+- State the facts and current status clearly and directly.`,
         });
       }
     }
@@ -649,6 +682,22 @@ CRITICAL INSTRUCTIONS:
 - Present the image to the user using this exact markdown tag: ${autoImage.markdown}
 - Briefly describe the visual atmosphere of the generated image.
 - Do NOT output '[image data]' or placeholder tokens.`,
+      });
+    }
+
+    // Direct Document Generation resolution (PDF, Word DOCX, Excel XLSX, PowerPoint PPTX)
+    const autoDoc = await detectAndExecuteDocumentGeneration(messages);
+    if (autoDoc) {
+      conversationHistory.push({
+        role: 'system',
+        content: `[DOCUMENT GENERATION RESULT for "${autoDoc.title}"]:\nA physical ${autoDoc.format.toUpperCase()} document has been successfully generated and is available for download at: ${autoDoc.downloadUrl}
+
+CRITICAL MANDATORY INSTRUCTIONS:
+- The requested ${autoDoc.format.toUpperCase()} document has been created successfully.
+- You MUST provide a clear, direct download link to the file in your response using exact markdown syntax:
+  [Download ${autoDoc.filename}](${autoDoc.downloadUrl})
+- Briefly introduce the generated file and confirm that it is ready for download.
+- NEVER say your document rendering engine is experiencing an outage or that you cannot generate physical files.`,
       });
     }
 
@@ -1008,7 +1057,11 @@ CRITICAL INSTRUCTIONS:
                 try { toolArgs = JSON.parse(toolArgs); } catch { toolArgs = {}; }
               }
               const result = await executeTool(toolName, toolArgs, userAuthToken);
-              conversationHistory.push({ role: 'tool', tool_call_id: `call_${round}_${idx}`, name: toolName, content: JSON.stringify(result) });
+              let toolContent = JSON.stringify(result);
+              if (toolContent.length > 20000) {
+                toolContent = toolContent.replace(/data:[^;]+;base64,[A-Za-z0-9+/=]+/g, '[binary data omitted]').slice(0, 20000);
+              }
+              conversationHistory.push({ role: 'tool', tool_call_id: `call_${round}_${idx}`, name: toolName, content: toolContent });
             }
           }
 

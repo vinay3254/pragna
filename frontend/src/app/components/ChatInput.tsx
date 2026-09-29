@@ -56,9 +56,20 @@ export default function ChatInput({
   }, [value, isStreaming, onSendMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+    const sendOnEnter = typeof window !== 'undefined'
+      ? localStorage.getItem('pragna_send_on_enter') !== 'false'
+      : true;
+
+    if (sendOnEnter) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      }
+    } else {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        handleSend();
+      }
     }
   };
 

@@ -27,7 +27,7 @@ def create_user(conn, email: str, password_hash: str, name: str | None = None) -
 
 def get_user_by_email_or_username(conn, identifier: str) -> dict | None:
     row = conn.execute(
-        "SELECT id, email, password_hash, created_at, oauth_provider, oauth_id, name, avatar_url "
+        "SELECT id, email, password_hash, created_at, oauth_provider, oauth_id, name, avatar_url, COALESCE(plan, 'free') as plan "
         "FROM users WHERE lower(email) = lower(?) OR name = ?",
         (identifier, identifier),
     ).fetchone()
@@ -55,7 +55,7 @@ def delete_user(conn, user_id: int) -> bool:
 
 def get_user(conn, user_id: int) -> dict | None:
     row = conn.execute(
-        "SELECT id, email, password_hash, created_at, oauth_provider, oauth_id, name, avatar_url "
+        "SELECT id, email, password_hash, created_at, oauth_provider, oauth_id, name, avatar_url, COALESCE(plan, 'free') as plan "
         "FROM users WHERE id = ?",
         (user_id,),
     ).fetchone()
@@ -64,7 +64,7 @@ def get_user(conn, user_id: int) -> dict | None:
 
 def get_user_by_email(conn, email: str) -> dict | None:
     row = conn.execute(
-        "SELECT id, email, password_hash, created_at, oauth_provider, oauth_id, name, avatar_url "
+        "SELECT id, email, password_hash, created_at, oauth_provider, oauth_id, name, avatar_url, COALESCE(plan, 'free') as plan "
         "FROM users WHERE email = ?",
         (email,),
     ).fetchone()
@@ -659,5 +659,87 @@ def consume_password_reset(conn, reset_id: int, user_id: int) -> None:
 def cleanup_expired_password_resets(conn) -> None:
     conn.execute("DELETE FROM password_resets WHERE expires_at < ?", (_now(),))
     conn.commit()
+
+
+# ===========================================================================
+# Subscriptions & Billing
+# ===========================================================================
+
+def create_subscription_order(
+    conn, user_id: int, plan: str, amount_paise: int, provider: str = "demo"
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO subscriptions (user_id, plan, amount_paise, status, provider, created_at) "
+        "VALUES (?, ?, ?, 'created', ?, ?)",
+        (user_id, plan, amount_paise, provider, _now()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_subscription(conn, subscription_id: int, user_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT id, user_id, plan, amount_paise, status, provider, current_period_end, created_at "
+        "FROM subscriptions WHERE id = ? AND user_id = ?",
+        (subscription_id, user_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def mark_subscription_paid(
+    conn, subscription_id: int, user_id: int, plan: str, current_period_end: str
+) -> bool:
+    cur = conn.execute(
+        "UPDATE subscriptions SET status = 'paid', current_period_end = ? WHERE id = ? AND user_id = ?",
+        (current_period_end, subscription_id, user_id),
+    )
+    if cur.rowcount > 0:
+        conn.execute("UPDATE users SET plan = ? WHERE id = ?", (plan, user_id))
+        conn.commit()
+        return True
+    return False
+
+
+def update_user_plan(conn, user_id: int, plan: str) -> None:
+    conn.execute("UPDATE users SET plan = ? WHERE id = ?", (plan, user_id))
+    conn.commit()
+
+
+def get_user_subscription_status(conn, user_id: int) -> dict:
+    user = get_user(conn, user_id)
+    if not user:
+        return {"plan": "free", "current_period_end": None}
+
+    user_plan = user.get("plan") or "free"
+
+    # Find the latest paid subscription
+    row = conn.execute(
+        "SELECT id, plan, current_period_end FROM subscriptions "
+        "WHERE user_id = ? AND status = 'paid' "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+
+    if not row:
+        if user_plan != "free":
+            update_user_plan(conn, user_id, "free")
+        return {"plan": "free", "current_period_end": None}
+
+    period_end = row["current_period_end"]
+    if period_end:
+        try:
+            end_dt = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
+            now_dt = datetime.now(timezone.utc)
+            if end_dt < now_dt:
+                # Subscription has expired! Downgrade back to free
+                update_user_plan(conn, user_id, "free")
+                return {"plan": "free", "current_period_end": None}
+        except Exception:
+            if period_end < _now():
+                update_user_plan(conn, user_id, "free")
+                return {"plan": "free", "current_period_end": None}
+
+    return {"plan": row["plan"] or user_plan, "current_period_end": period_end}
+
 
 
