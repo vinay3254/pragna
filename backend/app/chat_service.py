@@ -17,6 +17,13 @@ ALLOWED_MODELS = {
     "gemma4:31b-cloud",
     "nemotron-3-super:cloud",
     "minimax-m3:cloud",
+    # Omniroute auto-routing models
+    "auto/smart", "auto/fast", "auto/chat", "auto/cheap", "auto/best-chat",
+    "auto/best-coding", "auto/best-reasoning", "auto/best-fast", "auto/best-vision",
+    "auto/pro-coding", "auto/pro-reasoning", "auto/pro-vision", "auto/pro-chat",
+    "auto/pro-fast", "auto/coding", "auto/offline", "auto/claude-opus",
+    "auto/claude-sonnet", "auto/best-free", "auto/reasoning", "auto/multimodal",
+    "auto/gemma", "auto/llama", "auto/gemini",
 }
 
 BACKEND_MODEL_INFO = {
@@ -24,6 +31,15 @@ BACKEND_MODEL_INFO = {
     "gemma4:31b-cloud": ("Manas", "मनस्", "Google Gemma 4 31B", "mind/intellect", "Open weights (Free)"),
     "nemotron-3-super:cloud": ("Bṛhat", "बृहत्", "Nvidia Nemotron 120B", "vast/immense", "High capability (Free)"),
     "minimax-m3:cloud": ("Tvarā", "त्वरा", "MiniMax M3", "speed", "Instant response"),
+    # Omniroute
+    "auto/smart": ("Sāmarthya", "सामर्थ्य", "Omniroute Smart", "capability", "Auto-routed"),
+    "auto/fast": ("Tvarā", "त्वरा", "Omniroute Fast", "speed", "Auto-routed"),
+    "auto/chat": ("Vāk", "वाक्", "Omniroute Chat", "speech", "Auto-routed"),
+    "auto/best-chat": ("Śreṣṭha", "श्रेष्ठ", "Omniroute Best Chat", "best", "Auto-routed"),
+    "auto/best-coding": ("Śilpin", "शिल्पिन्", "Omniroute Best Coding", "craftsman", "Auto-routed"),
+    "auto/best-reasoning": ("Tarka", "तर्क", "Omniroute Best Reasoning", "logic", "Auto-routed"),
+    "auto/claude-sonnet": ("Kavi", "कवि", "Claude Sonnet via Omniroute", "poet", "Auto-routed"),
+    "auto/gemini": ("Mitra", "मित्र", "Gemini via Omniroute", "friend", "Auto-routed"),
 }
 
 def is_model_query(query: str) -> bool:
@@ -161,14 +177,16 @@ def _build_system_prompt(sources: list[dict], user_memories: list[str]) -> str:
         "any timezone -- compute it yourself from this UTC value instead of guessing or trusting "
         "web search result snippets, which are static page descriptions and rarely contain a live "
         "time value.\n\n"
-        "Your own knowledge has a training cutoff well before the current date above, so anything "
-        "you 'know' about news, sports results, scores, elections, prices, releases, or the status "
-        "of a scheduled event may be outdated or simply wrong by now. For any question about "
-        "something that could have happened, changed, or concluded between your training cutoff "
-        "and the current date, call web_search and check before answering -- don't reason from what "
-        "was scheduled or expected; find out what actually happened. Only skip the search if the "
-        "question is about a fact that cannot change (e.g. general knowledge, math, or writing "
-        "code).\n\n"
+        "Your own knowledge has a training cutoff well before the current date above. "
+        "MANDATORY RULE — NO EXCEPTIONS: Before answering ANY question about: current office-holders "
+        "(presidents, prime ministers, chief ministers, CEOs, champions, etc.), recent news, "
+        "elections, sports results/scores/standings, stock prices, software versions, ongoing events, "
+        "deaths, appointments, or anything that could have changed since your training — "
+        "you MUST call web_search FIRST. "
+        "Do NOT answer from memory for these topics. Do NOT say 'as of my knowledge'. "
+        "Violating this rule means giving the user wrong information. "
+        "If web_search returns results, use them. Only skip the search if the question is "
+        "purely about timeless facts (math, grammar, code syntax, well-established science).\n\n"
         "BROWSER TOOL SELECTION — read this carefully and follow it exactly:\n"
         "You have two completely different kinds of web access. Choosing the wrong one means you FAIL the task:\n\n"
         "A) open_url — ONLY use this when the user simply wants to OPEN or VISIT a site themselves to use it.\n"
@@ -432,6 +450,56 @@ async def _run_generation_loop(
 
     used_image_tool_last_round = False
 
+    # ── Always-Enabled Web Search ──────────────────────────────────────────
+    # User requested web search to be ALWAYS enabled.
+    # We fetch live results for all substantive user queries and inject them
+    # directly into context so responses are consistently grounded and up-to-date.
+    import re as _re
+    _query_stripped = query_text.strip()
+    _query_lower = _query_stripped.lower()
+
+    # Skip only for trivial greetings, image generation requests, or empty/non-searchable queries
+    _SKIP_SEARCH_PATTERNS = [
+        r"^(hi|hello|hey|hola|namaste|good\s+(morning|afternoon|evening|night))\b[!.]*$",
+        r"^(thanks|thank\s+you|ok|okay|bye|goodbye)\b[!.]*$",
+        r"^what('s| is) (today('s)? )?(date|time|day)\??$",
+        r"^(today'?s? )?(date|time|day)\??$",
+        r"^what time is it\??$",
+        r"^current (date|time|day)\??$",
+        r"\b(generate|create|draw|make|render|paint)\b.*\b(image|picture|photo|illustration|drawing|artwork|wallpaper)\b",
+        r"\b(image|picture|photo|illustration)\s+of\b",
+    ]
+    _skip_search = not _query_stripped or any(_re.search(p, _query_lower) for p in _SKIP_SEARCH_PATTERNS)
+
+    if not _skip_search:
+        try:
+            yield {"type": "status", "content": "Searching the web..."}
+            from app.tools import perform_web_search
+            _search_result = await perform_web_search(query_text)
+            _snippets = _search_result.get("results", [])
+            if _snippets and _search_result.get("provider") != "placeholder":
+                _ctx = (
+                    f"[LIVE WEB SEARCH CONTEXT for: \"{query_text}\"]\n"
+                    "Real-time search results fetched right now:\n\n"
+                )
+                for _i, _r in enumerate(_snippets[:5], 1):
+                    _title = _r.get("title", "")
+                    _snippet = _r.get("snippet", _r.get("description", ""))
+                    _url = _r.get("url", _r.get("href", ""))
+                    _ctx += f"{_i}. **{_title}**\n   {_snippet}\n   Source: {_url}\n\n"
+                _ctx += f"Instructions: Answer the question using the fresh search context above where relevant: {query_text}"
+                
+                ollama_messages = list(ollama_messages)
+                for _idx in range(len(ollama_messages) - 1, -1, -1):
+                    if ollama_messages[_idx].get("role") == "user":
+                        ollama_messages[_idx] = {**ollama_messages[_idx], "content": _ctx}
+                        break
+                else:
+                    ollama_messages.append({"role": "user", "content": _ctx})
+        except Exception as _e:
+            logger.warning("Always-enabled web search error: %s", _e)
+    # ────────────────────────────────────────────────────────────────────────
+
     try:
         MAX_TOOL_ROUNDS = 15
         for _round in range(MAX_TOOL_ROUNDS):
@@ -500,7 +568,7 @@ async def _run_generation_loop(
                 t_start = time.time()
                 res = await execute_tool(
                     t_name, t_args, browser_service=browser_service,
-                    conn=conn, conversation_id=conversation_id,
+                    conn=conn, conversation_id=conversation_id, user_id=user_id,
                 )
                 t_duration = round((time.time() - t_start) * 1000, 2)
                 try:
@@ -689,7 +757,7 @@ async def resume_tool_reply(
     if approved:
         res = await execute_tool(
             t_name, t_args, browser_service=browser_service,
-            conn=conn, conversation_id=conversation_id,
+            conn=conn, conversation_id=conversation_id, user_id=user_id,
         )
         status = "completed"
     else:

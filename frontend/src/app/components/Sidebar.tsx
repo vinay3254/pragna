@@ -18,6 +18,7 @@ import {
   Search,
   Settings,
   LogOut,
+  Sparkles,
 } from 'lucide-react';
 import { Conversation, ConversationGroup } from '../types/chat';
 import AppLogo from '@/components/ui/AppLogo';
@@ -39,6 +40,7 @@ interface SidebarProps {
   onOpenArtifacts?: () => void;
   onOpenTools?: () => void;
   onOpenSearch?: () => void;
+  onOpenImageStudio?: () => void;
 }
 
 export default function Sidebar({
@@ -55,6 +57,7 @@ export default function Sidebar({
   onOpenArtifacts,
   onOpenTools,
   onOpenSearch,
+  onOpenImageStudio,
 }: SidebarProps) {
   const router = useRouter();
   const { user, logout } = useAuth();
@@ -165,6 +168,7 @@ export default function Sidebar({
               <Clock size={17} strokeWidth={1.8} className="flex-shrink-0 text-muted-foreground group-hover:text-foreground transition-colors" />
               <span className="flex-1 text-left">Scheduled</span>
             </button>
+
             <button
               onClick={onOpenArtifacts}
               className="flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-all duration-150 group"

@@ -170,6 +170,7 @@ async function manageSkillReal(args: Record<string, any>): Promise<any> {
   };
 }
 
+let geminiQuotaBlockedUntil = 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COMPLETE AGENT TOOLS SCHEMA (Agentic Architecture + Doc Editing + Diagrams)
@@ -1929,56 +1930,169 @@ export async function executeTool(name: string, args: Record<string, any>, authT
         else if (aspectRatio === '4:3') { width = 1024; height = 768; }
         else if (aspectRatio === '3:4') { width = 768; height = 1024; }
 
-        const apiKey = process.env.STABILITY_API_KEY || process.env.NEXT_PUBLIC_STABILITY_API_KEY;
-        if (apiKey) {
-          try {
-            const formData = new FormData();
-            formData.append('prompt', prompt);
-            formData.append('output_format', 'webp');
-            if (args.aspect_ratio) formData.append('aspect_ratio', aspectRatio);
-            const res = await fetch('https://api.stability.ai/v2beta/stable-image/generate/core', {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${apiKey}`, Accept: 'image/*' },
-              body: formData,
-            });
-            if (res.ok) {
-              const buffer = await res.arrayBuffer();
-              const base64 = Buffer.from(buffer).toString('base64');
-              const dataUrl = `data:image/webp;base64,${base64}`;
-              return {
-                success: true,
-                prompt,
-                imageUrl: dataUrl,
-                markdown: `![${prompt}](${dataUrl})`,
-                summary: `Generated an image of: "${prompt}"\n\n![${prompt}](${dataUrl})`,
-              };
+        // 1. OmniRoute Image Generation (Primary)
+        const sizeStr =
+          aspectRatio === '16:9' ? '768x512' :
+          aspectRatio === '9:16' ? '512x768' :
+          aspectRatio === '4:3' ? '640x512' :
+          aspectRatio === '3:4' ? '512x640' : '512x512';
+
+        const omniKey = process.env.OMNIROUTE_API_KEY || 'sk-83ef8c640f53be5d-74e79d-e4fe3585';
+        const omniUrl = (process.env.OMNIROUTE_BASE_URL || 'http://127.0.0.1:20128').replace(/\/+$/, '');
+        const requestedModel = args.model;
+        const modelsToTry: string[] = [];
+        if (requestedModel) {
+          modelsToTry.push(requestedModel);
+        } else {
+          if (Date.now() >= geminiQuotaBlockedUntil) {
+            modelsToTry.push('antigravity/gemini-3.1-flash-image');
+          }
+          modelsToTry.push('aihorde/stable_diffusion');
+          modelsToTry.push('aihorde/AlbedoBase XL (SDXL)');
+          modelsToTry.push('aihorde/Flux.1-Schnell fp8 (Compact)');
+        }
+
+        if (omniKey) {
+          for (const m of modelsToTry) {
+            try {
+              const payload: any = { model: m, prompt };
+              if (m.includes('aihorde')) payload.size = sizeStr;
+
+              let res = await fetch(`${omniUrl}/v1/images/generations`, {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${omniKey}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(30000),
+              });
+
+              if (res.status === 429 && m.includes('gemini')) {
+                geminiQuotaBlockedUntil = Date.now() + 15 * 60 * 1000;
+                continue;
+              }
+
+              if (res.ok) {
+                const data = await res.json();
+                const item = data?.data?.[0];
+                const b64 = item?.b64_json;
+                const remoteUrl = item?.url;
+
+                let finalUrl = remoteUrl || '';
+                if (b64) {
+                  try {
+                    const nodeFs = await import('node:fs');
+                    const nodePath = await import('node:path');
+                    const baseDir = process.cwd().endsWith('frontend') ? process.cwd() : nodePath.join(process.cwd(), 'frontend');
+                    const publicDir = nodePath.resolve(baseDir, 'public', 'generated_images');
+                    if (!nodeFs.existsSync(publicDir)) {
+                      nodeFs.mkdirSync(publicDir, { recursive: true });
+                    }
+                    const filename = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`;
+                    nodeFs.writeFileSync(nodePath.join(publicDir, filename), Buffer.from(b64, 'base64'));
+                    finalUrl = `/generated_images/${filename}`;
+                  } catch (fsErr) {
+                    console.error('Error saving generated image to disk:', fsErr);
+                    finalUrl = `data:image/png;base64,${b64}`;
+                  }
+                }
+
+                if (finalUrl) {
+                  return {
+                    success: true,
+                    prompt,
+                    imageUrl: finalUrl,
+                    markdown: `![${prompt}](${finalUrl})`,
+                    summary: `Generated an image of: "${prompt}"\n\n![${prompt}](${finalUrl})`,
+                  };
+                }
+              }
+            } catch (err) {
+              console.warn(`Model ${m} failed or timed out:`, err);
             }
-          } catch (err) {
-            console.error('Stability API error, falling back to FLUX:', err);
           }
         }
 
-        const seed = Math.floor(Math.random() * 1000000);
-        const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=${width}&height=${height}&seed=${seed}&nologo=true&enhance=true`;
         return {
-          success: true,
-          prompt,
-          imageUrl: pollinationsUrl,
-          markdown: `![${prompt}](${pollinationsUrl})`,
-          summary: `Generated an image of: "${prompt}"\n\n![${prompt}](${pollinationsUrl})`,
+          success: false,
+          error: 'Image generation service temporarily unavailable in OmniRoute.',
         };
       }
 
       case 'edit_image': {
         const instruction = args.instruction || '';
-        const seed = Math.floor(Math.random() * 1000000);
-        const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(instruction)}?width=1024&height=1024&seed=${seed}&nologo=true&enhance=true`;
+        const omniKey = process.env.OMNIROUTE_API_KEY || 'sk-83ef8c640f53be5d-74e79d-e4fe3585';
+        const omniUrl = (process.env.OMNIROUTE_BASE_URL || 'http://127.0.0.1:20128').replace(/\/+$/, '');
+        if (omniKey) {
+          const modelsToTry: string[] = [];
+          if (Date.now() >= geminiQuotaBlockedUntil) {
+            modelsToTry.push('antigravity/gemini-3.1-flash-image');
+          }
+          modelsToTry.push('aihorde/stable_diffusion');
+          modelsToTry.push('aihorde/AlbedoBase XL (SDXL)');
+          modelsToTry.push('aihorde/Flux.1-Schnell fp8 (Compact)');
+
+          for (const m of modelsToTry) {
+            try {
+              const payload: any = { model: m, prompt: instruction };
+              if (m.includes('aihorde')) payload.size = '512x512';
+
+              let res = await fetch(`${omniUrl}/v1/images/generations`, {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${omniKey}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(25000),
+              });
+
+              if (res.status === 429 && m.includes('gemini')) {
+                geminiQuotaBlockedUntil = Date.now() + 15 * 60 * 1000;
+                continue;
+              }
+
+              if (res.ok) {
+                const data = await res.json();
+                const item = data?.data?.[0];
+                const b64 = item?.b64_json;
+                const remoteUrl = item?.url;
+                let finalUrl = remoteUrl || '';
+                if (b64) {
+                  try {
+                    const nodeFs = await import('node:fs');
+                    const nodePath = await import('node:path');
+                    const baseDir = process.cwd().endsWith('frontend') ? process.cwd() : nodePath.join(process.cwd(), 'frontend');
+                    const publicDir = nodePath.resolve(baseDir, 'public', 'generated_images');
+                    if (!nodeFs.existsSync(publicDir)) {
+                      nodeFs.mkdirSync(publicDir, { recursive: true });
+                    }
+                    const filename = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`;
+                    nodeFs.writeFileSync(nodePath.join(publicDir, filename), Buffer.from(b64, 'base64'));
+                    finalUrl = `/generated_images/${filename}`;
+                  } catch (fsErr) {
+                    finalUrl = `data:image/png;base64,${b64}`;
+                  }
+                }
+                if (finalUrl) {
+                  return {
+                    success: true,
+                    instruction,
+                    imageUrl: finalUrl,
+                    markdown: `![${instruction}](${finalUrl})`,
+                    summary: `Modified image according to instruction: "${instruction}"\n\n![${instruction}](${finalUrl})`,
+                  };
+                }
+              }
+            } catch (e) {
+              console.warn(`OmniRoute edit_image error with ${m}:`, e);
+            }
+          }
+        }
         return {
-          success: true,
-          instruction,
-          imageUrl: pollinationsUrl,
-          markdown: `![${instruction}](${pollinationsUrl})`,
-          summary: `Modified image according to instruction: "${instruction}"\n\n![${instruction}](${pollinationsUrl})`,
+          success: false,
+          error: 'Image modification temporarily unavailable in OmniRoute.',
         };
       }
 

@@ -303,24 +303,8 @@ function getOmnirouteKey(): string {
 }
 
 function mapOmnirouteModel(model: string): string {
-  switch (model) {
-    case 'claude-sonnet-4-5':
-      return 'auto/best-coding';
-    case 'claude-opus-4-5':
-      return 'gpt-6-astra-high';
-    case 'claude-haiku-3-5':
-      return 'auto/fast';
-    case 'deepseek-chat':
-    case 'deepseek-v3':
-      return 'auto/best-coding';
-    case 'google/gemma-4-31b-it:free':
-    case 'gemma-free':
-      return 'auto/best-free';
-    case 'nvidia/nemotron-3-super-120b-a12b:free':
-      return 'auto/best-free';
-    default:
-      return 'auto/best-coding';
-  }
+  if (model?.startsWith('antigravity/')) return model;
+  return 'antigravity/gemini-2.5-flash';
 }
 
 function getBackendOllamaKeys(): string[] {
@@ -360,13 +344,19 @@ async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: stri
   const isGreeting = /^(hi|hello|hey|greetings|good morning|good evening|good afternoon|howdy|sup|thanks|thank you|bye|goodbye|ok|okay)[!.? ]*$/i.test(lastMsg);
   if (isGreeting) return null;
 
+  // 2. Skip image generation requests (do not waste time searching web for images)
+  const isImageRequest = /\b(generate|create|draw|make|render|paint|produce|give me|show me)\b.*\b(image|picture|photo|illustration|drawing|painting|artwork|graphic|portrait|wallpaper|sketch)\b/i.test(lastMsg)
+    || /\b(image|picture|photo|illustration|drawing|painting)\s+of\b/i.test(lastMsg)
+    || /^draw\s+/i.test(lastMsg);
+  if (isImageRequest) return null;
+
   // Plain date/time questions are answered from the live clock in the system prompt, not from search results.
   if (/^\W*(what('s|s| is| was)?|tell me)\s+(the\s+)?(current\s+|today'?s?\s+)?(date|time|day)(\s+and\s+(date|time|day))?(\s+(now|today|right now))?\W*$/i.test(lastMsg)) return null;
 
-  // 2. Skip pure arithmetic
+  // 3. Skip pure arithmetic
   if (/^what is \d+[\s+\-*/^]+\d+/i.test(lastMsg) || /^calculate /i.test(lastMsg)) return null;
 
-  // 3. Skip pure generic coding requests that have NO real-world entity, model, or product names
+  // 4. Skip pure generic coding requests that have NO real-world entity, model, or product names
   const isPureGenericCoding = /^(write|create|implement|give me|show me)\s+(a\s+)?(python|javascript|typescript|c\+\+|java|rust|go|html|css|sql|function|script|algorithm|regex|class)\s+(to\s+|for\s+)?(reverse|sort|find|sum|calculate|loop|print|check|validate)\b/i.test(lastMsg);
   if (isPureGenericCoding) return null;
 
@@ -651,7 +641,14 @@ function sanitizeForLlm(text: string): string {
     if (autoImage) {
       conversationHistory.push({
         role: 'system',
-        content: `[IMAGE GENERATION RESULT for "${autoImage.prompt}"]:\nAn image has been successfully generated for the user's request.\n\nCRITICAL INSTRUCTIONS:\n- Briefly introduce and describe the generated image in a friendly, engaging sentence or two.\n- Do NOT output generic disclaimers or say you cannot generate images.`,
+        content: `[IMAGE GENERATION RESULT for "${autoImage.prompt}"]:\nAn image has been successfully generated for the user's request.
+Image URL: ${autoImage.imageUrl}
+Image Markdown: ${autoImage.markdown}
+
+CRITICAL INSTRUCTIONS:
+- Present the image to the user using this exact markdown tag: ${autoImage.markdown}
+- Briefly describe the visual atmosphere of the generated image.
+- Do NOT output '[image data]' or placeholder tokens.`,
       });
     }
 
@@ -875,8 +872,70 @@ function sanitizeForLlm(text: string): string {
           let toolsEnabled = enableTools !== false;
           let lastError = '';
 
-          // 1. Ollama Cloud (fast path), with the full tool set via native tool calling.
+          // 1. OmniRoute Gateway (Primary) — routes to best coding model
+          const omniKey = getOmnirouteKey();
+          if (omniKey && !hasImages) {
+            try {
+              const omniUrl = 'http://127.0.0.1:20128/v1/chat/completions';
+              let omniModel = mapOmnirouteModel(model);
+              for (let round = 0; round < MAX_ROUNDS; round++) {
+                const post = (m: string) =>
+                  fetch(omniUrl, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${omniKey}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      model: m,
+                      messages: toOpenAIMessages(conversationHistory),
+                      ...(toolsEnabled ? { tools: fullToolsSchema, tool_choice: 'auto' } : {}),
+                      temperature,
+                      max_tokens: 1500,
+                      stream: true,
+                    }),
+                    signal: AbortSignal.timeout(25000),
+                  });
+                let res: Response | null = null;
+                try {
+                  res = await post(omniModel);
+                } catch (netErr: any) {
+                  console.warn('Omniroute request failed:', netErr.message);
+                }
+                if (res && !res.ok && omniModel !== 'auto/best-free') {
+                  omniModel = 'auto/best-free';
+                  try { res = await post(omniModel); } catch {}
+                }
+                if (!res || !res.ok) break;
 
+                const toolCalls = await streamWithTools(res);
+                if (!toolCalls || toolCalls.length === 0) {
+                  streamedSuccess = true;
+                  console.log(`[Chat API] answered by OmniRoute (${omniModel})`);
+                  generateMentionedDocument(assistantResponseText);
+                  break;
+                }
+
+                conversationHistory.push({
+                  role: 'assistant',
+                  content: assistantResponseText,
+                  tool_calls: toolCalls.map((tc, idx) => ({
+                    id: tc.id || `call_${round}_${idx}`,
+                    type: 'function',
+                    function: { name: tc.function?.name, arguments: tc.function?.arguments ?? '{}' },
+                  })),
+                });
+                for (const [idx, tc] of toolCalls.entries()) {
+                  const toolName = tc.function?.name;
+                  let toolArgs: Record<string, any> = {};
+                  try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+                  const result = await executeTool(toolName, toolArgs, userAuthToken);
+                  conversationHistory.push({ role: 'tool', tool_call_id: tc.id || `call_${round}_${idx}`, name: toolName, content: JSON.stringify(result) });
+                }
+              }
+            } catch (omniErr) {
+              console.warn('OmniRoute error, attempting fallback:', omniErr);
+            }
+          }
+
+          // 2. Ollama Cloud Fallback
           for (let round = 0; round < MAX_ROUNDS && !streamedSuccess; round++) {
             // The last round runs without tools so the model has to write a final answer.
             const withTools = toolsEnabled && round < MAX_ROUNDS - 1;
@@ -953,74 +1012,7 @@ function sanitizeForLlm(text: string): string {
             }
           }
 
-          // 2. Omniroute (local gateway) as the fallback when Ollama Cloud did not answer.
-          // Image messages skip it: only Ollama's gemma4 vision path handles them.
-          const omniKey = getOmnirouteKey();
-          if (!streamedSuccess && omniKey && !hasImages) {
-            try {
-              const omniUrl = 'http://127.0.0.1:20128/v1/chat/completions';
-              let omniModel = mapOmnirouteModel(model);
-              for (let round = 0; round < MAX_ROUNDS; round++) {
-                const post = (m: string) =>
-                  fetch(omniUrl, {
-                    method: 'POST',
-                    headers: { Authorization: `Bearer ${omniKey}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      model: m,
-                      messages: toOpenAIMessages(conversationHistory),
-                      ...(toolsEnabled ? { tools: fullToolsSchema, tool_choice: 'auto' } : {}),
-                      temperature,
-                      max_tokens: 1500,
-                      stream: true,
-                    }),
-                    signal: AbortSignal.timeout(25000),
-                  });
-                let res: Response | null = null;
-                try {
-                  res = await post(omniModel);
-                } catch (netErr: any) {
-                  console.warn('Omniroute request failed:', netErr.message);
-                }
-                if (res && !res.ok && omniModel !== 'auto/best-free') {
-                  omniModel = 'auto/best-free';
-                  try { res = await post(omniModel); } catch {}
-                }
-                if (!res || !res.ok) break;
 
-                const toolCalls = await streamWithTools(res);
-                if (!toolCalls || toolCalls.length === 0) {
-                  streamedSuccess = true;
-                  console.log(`[Chat API] answered by Omniroute (${omniModel})`);
-                  break;
-                }
-
-                conversationHistory.push({
-                  role: 'assistant',
-                  content: null,
-                  tool_calls: toolCalls.map((tc) => ({
-                    id: tc.id,
-                    type: 'function',
-                    function: { name: tc.function.name, arguments: tc.function.arguments },
-                  })),
-                });
-                for (const tc of toolCalls) {
-                  const toolName = tc.function?.name;
-                  let toolArgs: Record<string, any> = {};
-                  try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch {}
-                  const result = await executeTool(toolName, toolArgs, userAuthToken);
-                  conversationHistory.push({
-                    role: 'tool',
-                    tool_call_id: tc.id,
-                    name: toolName,
-                    content: JSON.stringify(result),
-                  });
-                }
-              }
-            } catch (err: any) {
-              // A timeout or broken stream here must not throw: fall through to the error message below.
-              console.warn('Omniroute fallback failed:', err?.message);
-            }
-          }
 
           if (!streamedSuccess) {
             sendText(`\n\n*(Error: could not get a response from Ollama or Omniroute${lastError ? `: ${lastError}` : ''}.)*\n`);
@@ -1029,8 +1021,13 @@ function sanitizeForLlm(text: string): string {
           console.error('Agent loop error:', err);
           sendText(`\n\n*(Error: ${err.message || 'Unknown error'})*\n`);
         } finally {
-          if (autoImage && (!assistantResponseText.includes(autoImage.imageUrl) && !assistantResponseText.includes('!['))) {
-            sendText(`\n\n${autoImage.markdown}\n`);
+          if (autoImage) {
+            if (assistantResponseText.includes('[image data]')) {
+              // The model emitted a placeholder: append the real image markdown
+              sendText(`\n\n${autoImage.markdown}\n`);
+            } else if (!assistantResponseText.includes(autoImage.imageUrl)) {
+              sendText(`\n\n${autoImage.markdown}\n`);
+            }
           }
           if (ragCitations.length > 0) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ citations: ragCitations })}\n\n`));

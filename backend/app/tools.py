@@ -785,21 +785,20 @@ async def perform_web_search(query: str) -> dict[str, Any]:
                 "https://html.duckduckgo.com/html/",
                 data={"q": query},
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-                timeout=10.0
+                timeout=3.5
             )
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
                 results = []
-                for result in soup.find_all("a", class_="result__url")[:5]:
-                    parent = result.find_parent("div", class_="result__body")
-                    if parent:
-                        title_elem = parent.find("a", class_="result__a")
-                        snippet_elem = parent.find("a", class_="result__snippet")
-                        results.append({
-                            "title": title_elem.get_text(strip=True) if title_elem else "Result",
-                            "url": result.get("href", "").strip(),
-                            "snippet": snippet_elem.get_text(strip=True) if snippet_elem else ""
-                        })
+                title_links = soup.find_all("a", class_="result__a")
+                snippet_elems = soup.find_all("a", class_="result__snippet")
+                for i, title_elem in enumerate(title_links[:5]):
+                    snippet_elem = snippet_elems[i] if i < len(snippet_elems) else None
+                    results.append({
+                        "title": title_elem.get_text(strip=True),
+                        "url": title_elem.get("href", "").strip(),
+                        "snippet": snippet_elem.get_text(strip=True) if snippet_elem else ""
+                    })
                 if results:
                     logger.info("Web search answered by provider: duckduckgo for query '%s'", query)
                     return {"success": True, "query": query, "provider": "duckduckgo", "results": results}
@@ -838,6 +837,7 @@ async def execute_tool(
     browser_service=None,
     conn=None,
     conversation_id: int | None = None,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     try:
         # ── Web & Search ──────────────────────────────────────────────────────
@@ -1039,18 +1039,18 @@ async def execute_tool(
                 if action == "list":
                     if conn is None:
                         return {"success": False, "error": "Database unavailable."}
-                    tasks = cron_service.list_scheduled_tasks(conn)
+                    tasks = cron_service.list_scheduled_tasks(conn, user_id=user_id)
                     return {"success": True, "tasks": tasks, "summary": f"{len(tasks)} scheduled tasks."}
                 elif action == "delete":
                     job_id = arguments.get("job_id", "")
                     if conn is None:
                         return {"success": False, "error": "Database unavailable."}
-                    return cron_service.cancel_scheduled_task(conn, int(job_id))
+                    return cron_service.cancel_scheduled_task(conn, int(job_id), user_id=user_id)
             prompt = arguments.get("prompt", "")
             schedule = arguments.get("schedule", "")
             if conn is None:
                 return {"success": False, "error": "Database connection unavailable."}
-            return cron_service.schedule_task(conn, prompt, schedule, conversation_id=str(conversation_id))
+            return cron_service.schedule_task(conn, prompt, schedule, conversation_id=str(conversation_id), user_id=user_id)
 
 
         # ── Clarify ───────────────────────────────────────────────────────────

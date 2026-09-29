@@ -346,7 +346,7 @@ export default function MessageBubble({
       {message.role === 'user' ? (
         <div className="flex justify-end message-enter group/msg">
           <div className="flex flex-col items-end gap-0.5">
-            <div className="relative max-w-[85%]">
+            <div className="relative inline-block max-w-[85%]">
               {/* Tooltip */}
               {exactTimestamp && (
                 <div className="absolute -top-7 right-0 z-10 pointer-events-none opacity-0 group-hover/msg:opacity-100 transition-opacity duration-150">

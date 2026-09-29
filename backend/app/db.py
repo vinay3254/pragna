@@ -110,7 +110,8 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     schedule_expression TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     conversation_id TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS shared_conversations (
     token TEXT PRIMARY KEY,
@@ -232,6 +233,8 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
 );
 ALTER TABLE scheduled_jobs ADD COLUMN IF NOT EXISTS title TEXT;
 ALTER TABLE scheduled_jobs ADD COLUMN IF NOT EXISTS last_run TEXT;
+ALTER TABLE scheduled_jobs ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_user_id ON scheduled_jobs(user_id);
 CREATE TABLE IF NOT EXISTS shared_conversations (
     token TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -597,6 +600,12 @@ def _migrate_scheduled_jobs_columns(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE scheduled_jobs ADD COLUMN last_run TEXT")
         except Exception:
             pass
+    if "user_id" not in columns:
+        try:
+            conn.execute("ALTER TABLE scheduled_jobs ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+        except Exception:
+            pass
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_user_id ON scheduled_jobs(user_id)")
 
 
 def init_db(db_path: str, database_url: str | None = None) -> None:

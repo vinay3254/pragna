@@ -114,7 +114,7 @@ async def run_agent_endpoint(request: Request, body: AgentRunRequest, current_us
                     yield f"data: {json.dumps({'type': 'confirm_required', 'tool': t_name, 'args': t_args, 'session_id': session_id, 'preview': f'Execute {t_name} with {json.dumps(t_args)}?'})}\n\n"
                     return
 
-                res = await execute_tool(t_name, t_args, browser_service=browser_service, conn=state.conn)
+                res = await execute_tool(t_name, t_args, browser_service=browser_service, conn=state.conn, user_id=current_user["id"])
                 yield f"data: {json.dumps({'type': 'tool_result', 'tool': t_name, 'content': json.dumps(res) if isinstance(res, dict) else str(res), 'session_id': session_id})}\n\n"
 
             yield f"data: {json.dumps({'type': 'done', 'content': 'Agent finished task execution.', 'session_id': session_id})}\n\n"
@@ -145,7 +145,7 @@ async def resume_agent_endpoint(request: Request, body: AgentResumeRequest, curr
         try:
             if body.decision == "approve":
                 yield f"data: {json.dumps({'type': 'thought', 'content': f'Tool {t_name} approved. Executing...', 'session_id': body.session_id})}\n\n"
-                res = await execute_tool(t_name, t_args, browser_service=browser_service, conn=state.conn)
+                res = await execute_tool(t_name, t_args, browser_service=browser_service, conn=state.conn, user_id=current_user["id"])
                 yield f"data: {json.dumps({'type': 'tool_result', 'tool': t_name, 'content': json.dumps(res) if isinstance(res, dict) else str(res), 'session_id': body.session_id})}\n\n"
             else:
                 yield f"data: {json.dumps({'type': 'tool_result', 'tool': t_name, 'content': 'Action rejected by user.', 'session_id': body.session_id})}\n\n"

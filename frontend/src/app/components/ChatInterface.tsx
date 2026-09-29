@@ -6,6 +6,7 @@ import ChatWindow from './ChatWindow';
 import ArtifactPanel from './ArtifactPanel';
 import CommandPalette from './CommandPalette';
 import ToolsPanel from './ToolsPanel';
+import ImageGenerationModal from './ImageGenerationModal';
 import { Conversation, Message, ModelOption, Source } from '../types/chat';
 import { generateId, getConversationTitle, groupConversationsByDate } from '../utils/chatUtils';
 import { SANSKRIT_MODELS } from '@/lib/modelDisplayNames';
@@ -123,6 +124,7 @@ export default function ChatInterface() {
   const [activeArtifact, setActiveArtifact] = useState<{ title: string; content: string; language?: string } | null>(null);
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const [toolsPanelOpen, setToolsPanelOpen] = useState(false);
+  const [imageStudioOpen, setImageStudioOpen] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
     if (typeof window === 'undefined') return 'en';
     const initialized = localStorage.getItem('pragna_lang_initialized');
@@ -675,6 +677,7 @@ export default function ChatInterface() {
         onOpenArtifacts={() => setArtifactOpen(p => !p)}
         onOpenTools={() => setToolsPanelOpen(true)}
         onOpenSearch={() => setCmdPaletteOpen(true)}
+        onOpenImageStudio={() => setImageStudioOpen(true)}
       />
       <div className="flex-1 flex overflow-hidden min-w-0">
         <ChatWindow
@@ -719,6 +722,15 @@ export default function ChatInterface() {
       {toolsPanelOpen && (
         <ToolsPanel onClose={() => setToolsPanelOpen(false)} />
       )}
+
+      {/* OmniRoute Image Studio Modal */}
+      <ImageGenerationModal
+        open={imageStudioOpen}
+        onClose={() => setImageStudioOpen(false)}
+        onInsertToChat={(imageUrl, imgPrompt) => {
+          sendMessage(`![${imgPrompt}](${imageUrl})`);
+        }}
+      />
     </div>
   );
 }
