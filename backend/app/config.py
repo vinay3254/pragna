@@ -30,6 +30,10 @@ class Settings(BaseSettings):
             return f"https://{val}"
         return val
     chat_model: str = "gemma4:cloud"
+    omniroute_base_url: str = "http://127.0.0.1:20128"
+    omniroute_api_key: str | None = None
+    ollama_local_url: str = "http://localhost:11434"
+    ollama_local_model: str = "gemma3"
     embed_model: str = "nomic-embed-text"
     rag_similarity_threshold: float = 0.5
     db_path: str = "data/pragna.db"

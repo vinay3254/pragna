@@ -14,6 +14,7 @@ import { getAuthToken } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { notifyIfBackgrounded } from '@/lib/notifications';
 import { toast } from 'sonner';
+import { Clock } from 'lucide-react';
 
 export const MODELS: ModelOption[] = SANSKRIT_MODELS.map((m) => ({
   id: m.id,
@@ -215,8 +216,9 @@ export default function ChatInterface() {
     }
   }, [user?.id, user?.email]);
 
-  // Poll scheduled reminders and surface the ones that fired while we weren't
-  // watching (toast + a message dropped into whichever conversation is open).
+  // Scheduled tasks run on the backend and post their answers into a backend chat.
+  // Chats are kept in localStorage, so poll the tasks and copy those answers into a
+  // local scheduled chat, with a toast when a new answer arrives.
   const activeConversationIdRef = React.useRef(activeConversationId);
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
@@ -224,58 +226,85 @@ export default function ChatInterface() {
 
   useEffect(() => {
     if (!user) return;
-    const seenCompletedIds = new Set<string | number>();
+    const syncedRunKeys = new Map<number, string>();
+    const pendingOpen = new URLSearchParams(window.location.search).get('open');
+    const seenMessageIds = new Set<string>();
     let firstPoll = true;
 
     const poll = async () => {
       try {
         const token = getAuthToken();
         if (!token) return;
-        const res = await fetch('/api/tools/scheduled', { headers: { Authorization: `Bearer ${token}` } });
+        const headers = { Authorization: `Bearer ${token}` };
+        const res = await fetch('/api/tools/scheduled', { headers });
         if (!res.ok) return;
         const data = await res.json();
         const jobs: any[] = data?.jobs || [];
-        const completed = jobs.filter(j => j.status === 'completed');
 
-        if (firstPoll) {
-          // Don't fire toasts for reminders that already completed before this
-          // tab was open — just establish the baseline.
-          completed.forEach(j => seenCompletedIds.add(j.id));
-          firstPoll = false;
-          return;
-        }
+        for (const job of jobs) {
+          if (!job.conversation_id) continue;
+          const runKey = `${job.last_run || ''}:${job.status}:${job.running ? 1 : 0}:${(job.last_result || '').length}`;
+          if (syncedRunKeys.get(job.id) === runKey) continue;
+          syncedRunKeys.set(job.id, runKey);
 
-        for (const job of completed) {
-          if (seenCompletedIds.has(job.id)) continue;
-          seenCompletedIds.add(job.id);
-          toast(job.prompt, { icon: '⏰', duration: 10000 });
-          notifyIfBackgrounded('Pragna reminder', job.prompt);
+          const convRes = await fetch(`/api/conversations/${job.conversation_id}`, { headers });
+          if (!convRes.ok) continue;
+          const remote = await convRes.json();
+          const localId = `sched-${job.conversation_id}`;
+          const remoteMessages: Message[] = (remote.messages || []).map((m: any) => ({
+            id: `${localId}-${m.id}`,
+            role: m.role === 'user' ? 'user' : 'assistant',
+            content: m.content,
+            timestamp: m.created_at || new Date().toISOString(),
+          }));
 
-          const convId = activeConversationIdRef.current;
-          if (convId) {
-            setConversations(prev => {
-              const updated = prev.map(c => {
-                if (c.id !== convId) return c;
-                const reminderMsg: Message = {
-                  id: generateId('msg'),
-                  role: 'assistant',
-                  content: `⏰ **Reminder:** ${job.prompt}`,
-                  timestamp: new Date().toISOString(),
-                };
-                return { ...c, messages: [...c.messages, reminderMsg], updatedAt: new Date().toISOString() };
-              });
-              saveConversations(userRef.current, updated);
-              return updated;
+          const addedCount = remoteMessages.filter(m => !seenMessageIds.has(m.id)).length;
+          remoteMessages.forEach(m => seenMessageIds.add(m.id));
+          setConversations(prev => {
+            const existing = prev.find(c => c.id === localId);
+            const knownIds = new Set((existing?.messages || []).map(m => m.id));
+            const fresh = remoteMessages.filter(m => !knownIds.has(m.id));
+            if (fresh.length === 0) return prev;
+            const now = new Date().toISOString();
+            const updated = existing
+              ? prev.map(c => (c.id === localId ? { ...c, messages: [...c.messages, ...fresh], updatedAt: now } : c))
+              : [
+                  {
+                    id: localId,
+                    title: String(remote.title || job.title || 'Scheduled task').replace(/^\u23f0\uFE0F?\s*/, ''),
+                    messages: fresh,
+                    model: 'scheduled-task',
+                    createdAt: remote.created_at || now,
+                    updatedAt: now,
+                  } as Conversation,
+                  ...prev,
+                ];
+            saveConversations(userRef.current, updated);
+            return updated;
+          });
+
+          if (pendingOpen === localId) {
+            setActiveConversationId(localId);
+            window.history.replaceState(null, '', window.location.pathname);
+          }
+
+          if (!firstPoll && addedCount > 0) {
+            toast(`Result ready: ${job.title || 'Scheduled task'}`, {
+              icon: <Clock size={16} />,
+              duration: 15000,
+              action: { label: 'Open', onClick: () => setActiveConversationId(localId) },
             });
+            notifyIfBackgrounded('Pragna scheduled task', job.title || 'Result ready');
           }
         }
+        firstPoll = false;
       } catch {
-        // Network hiccup — just try again on the next tick.
+        // Network hiccup: try again on the next tick.
       }
     };
 
     poll();
-    const interval = setInterval(poll, 8000);
+    const interval = setInterval(poll, 5000);
     return () => clearInterval(interval);
   }, [user?.id]);
 

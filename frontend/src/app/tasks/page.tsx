@@ -28,7 +28,11 @@ import {
   ArrowLeft,
   SlidersHorizontal,
   Bell,
-  MessageSquare
+  MessageSquare,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  ExternalLink
 } from 'lucide-react';
 
 interface ScheduledJob {
@@ -39,6 +43,20 @@ interface ScheduledJob {
   status: string;
   created_at: string;
   last_run?: string | null;
+  schedule_label?: string;
+  next_run?: string | null;
+  conversation_id?: string | null;
+  running?: boolean;
+  last_result?: string | null;
+  last_ok?: boolean | null;
+}
+
+interface SchedulePreview {
+  found: boolean;
+  label?: string;
+  expression?: string;
+  next_run?: string;
+  recurring?: boolean;
 }
 
 const SCHEDULED_STARTERS = [
@@ -128,6 +146,33 @@ function WavyDivider() {
   );
 }
 
+const WHEN_CHIPS = [
+  'Every morning at 9am',
+  'Weekdays at 8am',
+  'Every hour',
+  'In 30 minutes',
+  'Tomorrow at 9am',
+  'Every Monday at 9am',
+];
+
+function formatWhen(iso?: string | null): string {
+  if (!iso) return '';
+  const date = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : `${iso}Z`);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+}
+
+function formatAgo(iso?: string | null): string {
+  if (!iso) return '';
+  const date = new Date(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`);
+  const seconds = Math.round((Date.now() - date.getTime()) / 1000);
+  if (Number.isNaN(seconds)) return '';
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`;
+  return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+
 export default function ScheduledTasksPage() {
   const router = useRouter();
   const [tasks, setTasks] = useState<ScheduledJob[]>([]);
@@ -141,24 +186,42 @@ export default function ScheduledTasksPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalTitle, setModalTitle] = useState('');
   const [modalPrompt, setModalPrompt] = useState('');
-  const [modalSchedule, setModalSchedule] = useState('Weekdays at 8:00 AM');
-  const [modalDelivery, setModalDelivery] = useState<'notification' | 'chat'>('notification');
+  const [modalWhen, setModalWhen] = useState('');
+  const [preview, setPreview] = useState<SchedulePreview | null>(null);
+  const [detected, setDetected] = useState<SchedulePreview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   // Load scheduled tasks
-  const fetchTasks = async () => {
+  const wasRunning = React.useRef<Set<number>>(new Set());
+  const fetchTasks = async (silent = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const token = getAuthToken();
       const res = await fetch('/api/tools/scheduled', {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (res.ok) {
         const data = await res.json();
-        setTasks(data.jobs || []);
+        const jobs: ScheduledJob[] = data.jobs || [];
+        setTasks(jobs);
+        // Tell the user when a run they were waiting on has finished.
+        for (const job of jobs) {
+          if (wasRunning.current.has(job.id) && !job.running) {
+            wasRunning.current.delete(job.id);
+            const name = job.title || job.prompt.slice(0, 30);
+            if (job.last_ok === false) {
+              toast.error(`"${name}" could not finish`, { action: { label: 'See why', onClick: () => openResult(job) } });
+            } else {
+              toast.success(`"${name}" is done`, { action: { label: 'View result', onClick: () => openResult(job) } });
+            }
+          } else if (job.running) {
+            wasRunning.current.add(job.id);
+          }
+        }
       }
     } catch {
-      toast.error('Failed to load scheduled tasks');
+      if (!silent) toast.error('Failed to load scheduled tasks');
     } finally {
       setLoading(false);
     }
@@ -166,46 +229,94 @@ export default function ScheduledTasksPage() {
 
   useEffect(() => {
     fetchTasks();
+    const interval = setInterval(() => fetchTasks(true), 4000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const openNewTaskModal = (starter?: typeof SCHEDULED_STARTERS[0]) => {
-    if (starter) {
-      setModalTitle(starter.title);
-      setModalPrompt(starter.defaultPrompt);
-      setModalSchedule(starter.schedule);
-    } else {
-      setModalTitle('');
-      setModalPrompt('');
-      setModalSchedule('Weekdays at 8:00 AM');
-    }
-    setModalDelivery('notification');
+    setModalTitle(starter ? starter.title : '');
+    setModalPrompt(starter ? starter.defaultPrompt : '');
+    setModalWhen(starter ? starter.schedule : '');
+    setPreview(null);
+    setDetected(null);
     setModalOpen(true);
   };
+
+  const timeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  const requestPreview = async (text: string): Promise<SchedulePreview | null> => {
+    try {
+      const token = getAuthToken();
+      const res = await fetch('/api/tools/scheduled/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ text, timezone: timeZone() }),
+      });
+      return res.ok ? await res.json() : null;
+    } catch {
+      return null;
+    }
+  };
+
+  // Live "next run" preview for what was typed in the When box.
+  useEffect(() => {
+    if (!modalOpen) return;
+    if (!modalWhen.trim()) {
+      setPreview(null);
+      return;
+    }
+    setPreviewing(true);
+    const handle = setTimeout(async () => {
+      setPreview(await requestPreview(modalWhen));
+      setPreviewing(false);
+    }, 300);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalWhen, modalOpen]);
+
+  // Pick up a time written inside the instructions ("...every weekday at 8am") when When is empty.
+  useEffect(() => {
+    if (!modalOpen || modalWhen.trim()) {
+      setDetected(null);
+      return;
+    }
+    const handle = setTimeout(async () => {
+      const found = await requestPreview(modalPrompt);
+      setDetected(found?.found ? found : null);
+    }, 500);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalPrompt, modalWhen, modalOpen]);
 
   const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!modalPrompt.trim()) return;
 
+    const chosen = preview?.found ? preview : detected;
+    if (!chosen?.found || !chosen.expression) {
+      toast.error('Tell me when to run it, for example "every weekday at 8am"');
+      return;
+    }
+
     setSubmitting(true);
     try {
       const token = getAuthToken();
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      };
       const res = await fetch('/api/tools/scheduled', {
         method: 'POST',
-        headers,
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({
           action: 'create',
-          title: modalTitle.trim() || 'Untitled scheduled task',
+          title: modalTitle.trim() || modalPrompt.trim().split('\n')[0].slice(0, 40),
           prompt: modalPrompt.trim(),
-          schedule: modalSchedule,
+          schedule: chosen.expression,
         }),
       });
-
-      if (res.ok) {
-        toast.success(`Scheduled task "${modalTitle || 'New task'}" created`);
+      const created = res.ok ? await res.json().catch(() => null) : null;
+      if (created && created.success === false) {
+        toast.error(created.error || 'Failed to create scheduled task');
+      } else if (res.ok) {
+        toast.success(`Scheduled: ${chosen.label}`);
         setModalOpen(false);
         fetchTasks();
       } else {
@@ -216,6 +327,10 @@ export default function ScheduledTasksPage() {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const openResult = (job: ScheduledJob) => {
+    if (job.conversation_id) router.push(`/?open=sched-${job.conversation_id}`);
   };
 
   const handleToggleTask = async (jobId: number) => {
@@ -241,18 +356,14 @@ export default function ScheduledTasksPage() {
 
   const handleRunNow = async (job: ScheduledJob) => {
     try {
-      toast.info(`Running "${job.title || job.prompt.slice(0, 24)}" now...`);
       const token = getAuthToken();
       const res = await fetch('/api/tools/scheduled', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ action: 'run', job_id: job.id }),
       });
       if (res.ok) {
-        toast.success(`Task triggered successfully!`);
+        setTasks((prev) => prev.map((t) => (t.id === job.id ? { ...t, running: true } : t)));
         fetchTasks();
       }
     } catch {
@@ -299,7 +410,105 @@ export default function ScheduledTasksPage() {
     return result;
   }, [tasks, searchQuery, sortBy]);
 
-  const activeJobs = tasks.filter((t) => t.status === 'active' || t.status === 'paused');
+  const visibleJobs = filteredTasks.filter((t) => t.status !== 'cancelled');
+  const scheduledJobs = visibleJobs.filter((t) => t.status === 'active' || t.status === 'paused');
+  const finishedJobs = visibleJobs.filter((t) => t.status === 'completed');
+  const activeJobs = visibleJobs;
+
+  const renderJob = (job: ScheduledJob) => {
+    const name = job.title || job.prompt.slice(0, 36);
+    const finished = job.status === 'completed';
+    const failed = job.last_ok === false;
+    return (
+      <div
+        key={job.id}
+        className="p-4 rounded-2xl bg-card border border-border hover:border-[#d4af37]/40 shadow-sm transition-all flex flex-col gap-3 group"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+          <div className="space-y-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-semibold text-foreground truncate">{name}</span>
+              {job.running ? (
+                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full border bg-sky-500/15 text-sky-500 border-sky-500/25 flex items-center gap-1">
+                  <Loader2 size={10} className="animate-spin" /> Running
+                </span>
+              ) : finished ? (
+                <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full border flex items-center gap-1 ${failed ? 'bg-red-500/15 text-red-500 border-red-500/25' : 'bg-emerald-500/15 text-emerald-500 border-emerald-500/25'}`}>
+                  {failed ? <AlertCircle size={10} /> : <CheckCircle2 size={10} />} {failed ? 'Failed' : 'Done'}
+                </span>
+              ) : (
+                <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full border ${job.status === 'active' ? 'bg-emerald-500/15 text-emerald-500 dark:text-emerald-400 border-emerald-500/25' : 'bg-[#d4af37]/15 text-[#b8860b] dark:text-[#d4af37] border-[#d4af37]/30'}`}>
+                  {job.status === 'active' ? 'Active' : 'Paused'}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground line-clamp-1">{job.prompt}</p>
+            <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-[11px] text-muted-foreground/90 pt-0.5">
+              <span className="flex items-center gap-1 text-foreground/80">
+                <Clock size={11} className="text-[#d4af37]" />
+                {job.schedule_label || job.schedule}
+              </span>
+              {job.status === 'active' && job.next_run && <span>Next: {formatWhen(job.next_run)}</span>}
+              {job.last_run && <span>Last run {formatAgo(job.last_run)}</span>}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-start">
+            {job.conversation_id && job.last_run && (
+              <button
+                onClick={() => openResult(job)}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs gold-gradient-btn hover:opacity-95 transition-opacity"
+                title="Open the chat with this task's results"
+              >
+                <ExternalLink size={11} />
+                <span>View result</span>
+              </button>
+            )}
+            <button
+              onClick={() => handleRunNow(job)}
+              disabled={job.running}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs bg-muted hover:bg-[#d4af37]/20 text-foreground hover:text-[#d4af37] border border-border transition-colors disabled:opacity-50"
+              title="Run task now"
+            >
+              {job.running ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} fill="currentColor" />}
+              <span>{job.running ? 'Running' : 'Run now'}</span>
+            </button>
+            {!finished && (
+              <button
+                onClick={() => handleToggleTask(job.id)}
+                className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                title={job.status === 'active' ? 'Pause schedule' : 'Resume schedule'}
+              >
+                {job.status === 'active' ? <Pause size={13} /> : <Play size={13} />}
+              </button>
+            )}
+            <button
+              onClick={() => handleDeleteTask(job.id, job.title)}
+              className="p-1.5 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+              title="Delete scheduled task"
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+        </div>
+
+        {(job.running || job.last_result) && (
+          <button
+            type="button"
+            onClick={() => openResult(job)}
+            disabled={!job.conversation_id}
+            className={`text-left rounded-xl px-3 py-2 text-xs border transition-colors ${failed ? 'bg-red-500/5 border-red-500/20' : 'bg-muted/40 border-border/60 hover:border-[#d4af37]/40'}`}
+          >
+            {job.running ? (
+              <span className="flex items-center gap-1.5 text-muted-foreground"><Loader2 size={12} className="animate-spin" /> Pragna is working on this now…</span>
+            ) : (
+              <span className="line-clamp-3 text-foreground/80 whitespace-pre-line">{job.last_result}</span>
+            )}
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <AppLayout>
@@ -402,74 +611,31 @@ export default function ScheduledTasksPage() {
             </div>
           </div>
 
-          {/* Active Tasks List (if tasks exist) */}
+          {/* Task lists */}
           {activeJobs.length > 0 && (
-            <div className="mb-8 space-y-3">
-              <div className="flex items-center justify-between pb-1">
-                <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  Your Scheduled Tasks ({filteredTasks.length})
-                </h2>
-                <button onClick={fetchTasks} className="text-[11px] text-muted-foreground hover:text-foreground flex items-center gap-1">
-                  <RotateCcw size={11} className={loading ? 'animate-spin text-[#d4af37]' : ''} />
-                  <span>Refresh</span>
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 gap-2.5">
-                {filteredTasks.map((job) => (
-                  <div
-                    key={job.id}
-                    className="p-4 rounded-2xl bg-card hover:bg-muted/40 border border-border hover:border-[#d4af37]/40 shadow-sm transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 group"
-                  >
-                    <div className="space-y-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-semibold text-foreground truncate group-hover:text-[#d4af37] transition-colors">
-                          {job.title || job.prompt.slice(0, 36)}
-                        </span>
-                        <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full border ${job.status === 'active' ? 'bg-emerald-500/15 text-emerald-500 dark:text-emerald-400 border-emerald-500/25' : 'bg-[#d4af37]/15 text-[#b8860b] dark:text-[#d4af37] border-[#d4af37]/30'}`}>
-                          {job.status === 'active' ? 'Active' : 'Paused'}
-                        </span>
-                      </div>
-                      <p className="text-xs text-muted-foreground line-clamp-1">{job.prompt}</p>
-                      <div className="flex items-center gap-3 text-[11px] text-muted-foreground/80 pt-0.5">
-                        <span className="flex items-center gap-1 text-foreground/80">
-                          <Clock size={11} className="text-[#d4af37]" />
-                          {job.schedule}
-                        </span>
-                        {job.last_run && (
-                          <span>Last run: {new Date(job.last_run).toLocaleDateString()}</span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Action buttons */}
-                    <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
-                      <button
-                        onClick={() => handleRunNow(job)}
-                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs bg-muted hover:bg-[#d4af37]/20 text-foreground hover:text-[#d4af37] border border-border transition-colors"
-                        title="Run task immediately"
-                      >
-                        <Play size={11} fill="currentColor" />
-                        <span>Run</span>
-                      </button>
-                      <button
-                        onClick={() => handleToggleTask(job.id)}
-                        className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-                        title={job.status === 'active' ? 'Pause schedule' : 'Resume schedule'}
-                      >
-                        {job.status === 'active' ? <Pause size={13} /> : <Play size={13} />}
-                      </button>
-                      <button
-                        onClick={() => handleDeleteTask(job.id, job.title)}
-                        className="p-1.5 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
-                        title="Delete scheduled task"
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
+            <div className="mb-8 space-y-6">
+              {scheduledJobs.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between pb-1">
+                    <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      Scheduled ({scheduledJobs.length})
+                    </h2>
+                    <button onClick={() => fetchTasks()} className="text-[11px] text-muted-foreground hover:text-foreground flex items-center gap-1">
+                      <RotateCcw size={11} className={loading ? 'animate-spin text-[#d4af37]' : ''} />
+                      <span>Refresh</span>
+                    </button>
                   </div>
-                ))}
-              </div>
+                  <div className="grid grid-cols-1 gap-2.5">{scheduledJobs.map(renderJob)}</div>
+                </div>
+              )}
+              {finishedJobs.length > 0 && (
+                <div className="space-y-3">
+                  <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground pb-1">
+                    Finished ({finishedJobs.length})
+                  </h2>
+                  <div className="grid grid-cols-1 gap-2.5">{finishedJobs.map(renderJob)}</div>
+                </div>
+              )}
             </div>
           )}
 
@@ -542,92 +708,88 @@ export default function ScheduledTasksPage() {
               </div>
 
               <form onSubmit={handleCreateTask} className="flex flex-col gap-4 mt-5">
-                {/* Task Name */}
+                {/* What */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Task Name
+                    What should Pragna do?
+                  </label>
+                  <textarea
+                    autoFocus
+                    value={modalPrompt}
+                    onChange={(e) => setModalPrompt(e.target.value)}
+                    rows={4}
+                    placeholder="e.g. Every weekday at 8am, give me a short briefing of the latest AI news"
+                    className="w-full px-3.5 py-2.5 text-sm rounded-xl bg-background border border-border text-foreground placeholder:text-muted-foreground/60 outline-none focus:border-[#d4af37] focus:ring-1 focus:ring-[#d4af37]/40 resize-none"
+                  />
+                </div>
+
+                {/* When */}
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    When
+                  </label>
+                  <input
+                    type="text"
+                    value={modalWhen}
+                    onChange={(e) => setModalWhen(e.target.value)}
+                    placeholder='Type it naturally: "tomorrow at 6:30pm", "every Friday 5pm", "in 2 hours"'
+                    className="w-full px-3.5 py-2 text-sm rounded-xl bg-background border border-border text-foreground placeholder:text-muted-foreground/60 outline-none focus:border-[#d4af37] focus:ring-1 focus:ring-[#d4af37]/40"
+                  />
+                  <div className="flex flex-wrap gap-1.5">
+                    {WHEN_CHIPS.map((chip) => (
+                      <button
+                        key={chip}
+                        type="button"
+                        onClick={() => setModalWhen(chip)}
+                        className={`px-2.5 py-1 rounded-full text-[11px] border transition-colors ${
+                          modalWhen === chip
+                            ? 'bg-[#d4af37]/15 border-[#d4af37]/50 text-[#d4af37] font-medium'
+                            : 'bg-background border-border text-muted-foreground hover:text-foreground hover:border-[#d4af37]/40'
+                        }`}
+                      >
+                        {chip}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="min-h-[20px] text-xs" aria-live="polite">
+                    {modalWhen.trim() ? (
+                      previewing ? (
+                        <span className="text-muted-foreground flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Working out the time…</span>
+                      ) : preview?.found ? (
+                        <span className="text-emerald-500 dark:text-emerald-400 flex items-center gap-1.5">
+                          <CheckCircle2 size={13} />
+                          {preview.recurring ? 'Repeats. ' : 'Runs once. '}Next run: <strong>{formatWhen(preview.next_run)}</strong>
+                        </span>
+                      ) : (
+                        <span className="text-amber-500 flex items-center gap-1.5"><AlertCircle size={13} /> I could not read that time. Try "every day at 9am".</span>
+                      )
+                    ) : detected?.found ? (
+                      <button
+                        type="button"
+                        onClick={() => setModalWhen(detected.label || '')}
+                        className="text-[#d4af37] hover:underline flex items-center gap-1.5"
+                      >
+                        <Sparkles size={13} /> Found in your instructions: {detected.label}. Use this
+                      </button>
+                    ) : (
+                      <span className="text-muted-foreground">Times use your timezone ({timeZone()}).</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Optional name */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Name <span className="normal-case font-normal">(optional)</span>
                   </label>
                   <input
                     type="text"
                     value={modalTitle}
                     onChange={(e) => setModalTitle(e.target.value)}
-                    placeholder="e.g. Daily briefing, Competitor tracking"
+                    placeholder="Taken from your instructions if left empty"
                     className="w-full px-3.5 py-2 text-sm rounded-xl bg-background border border-border text-foreground placeholder:text-muted-foreground/60 outline-none focus:border-[#d4af37] focus:ring-1 focus:ring-[#d4af37]/40"
                   />
-                </div>
-
-                {/* Task Instructions */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Instructions / Prompt
-                  </label>
-                  <textarea
-                    value={modalPrompt}
-                    onChange={(e) => setModalPrompt(e.target.value)}
-                    rows={3}
-                    placeholder="What should the assistant do on schedule?"
-                    required
-                    className="w-full px-3.5 py-2.5 text-xs rounded-xl bg-background border border-border text-foreground placeholder:text-muted-foreground/60 outline-none focus:border-[#d4af37] focus:ring-1 focus:ring-[#d4af37]/40 resize-none"
-                  />
-                </div>
-
-                {/* Schedule Selector */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Schedule Frequency
-                  </label>
-                  <select
-                    value={modalSchedule}
-                    onChange={(e) => setModalSchedule(e.target.value)}
-                    className="w-full px-3 py-2 text-xs rounded-xl bg-background border border-border text-foreground outline-none focus:border-[#d4af37] cursor-pointer"
-                  >
-                    <option value="Weekdays at 8:00 AM">Weekdays at 8:00 AM</option>
-                    <option value="Daily at 9:00 AM">Daily at 9:00 AM</option>
-                    <option value="Every Monday at 9:00 AM">Every Monday at 9:00 AM</option>
-                    <option value="Every Friday at 4:00 PM">Every Friday at 4:00 PM</option>
-                    <option value="Every 1 hour">Every 1 hour</option>
-                    <option value="In 30 minutes">In 30 minutes (One-time)</option>
-                  </select>
-                </div>
-
-                {/* Delivery Mode */}
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Delivery Channel
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setModalDelivery('notification')}
-                      className={`flex items-center gap-2 p-2.5 rounded-xl border text-left text-xs transition-all ${
-                        modalDelivery === 'notification'
-                          ? 'bg-[#d4af37]/15 border-[#d4af37]/50 text-[#d4af37] font-medium'
-                          : 'bg-background border-border text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      <Bell size={14} className="shrink-0 text-[#d4af37]" />
-                      <div>
-                        <p className="font-semibold text-foreground">In-app Notification</p>
-                        <p className="text-[10px] text-muted-foreground">Popup reminder & log</p>
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setModalDelivery('chat')}
-                      className={`flex items-center gap-2 p-2.5 rounded-xl border text-left text-xs transition-all ${
-                        modalDelivery === 'chat'
-                          ? 'bg-[#d4af37]/15 border-[#d4af37]/50 text-[#d4af37] font-medium'
-                          : 'bg-background border-border text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      <MessageSquare size={14} className="shrink-0 text-[#d4af37]" />
-                      <div>
-                        <p className="font-semibold text-foreground">New Chat Thread</p>
-                        <p className="text-[10px] text-muted-foreground">Create conversation</p>
-                      </div>
-                    </button>
-                  </div>
                 </div>
 
                 {/* Actions */}
@@ -641,7 +803,7 @@ export default function ScheduledTasksPage() {
                   </button>
                   <button
                     type="submit"
-                    disabled={submitting}
+                    disabled={submitting || !(preview?.found || detected?.found)}
                     className="px-5 py-2 rounded-full text-xs font-semibold gold-gradient-btn hover:opacity-95 active:scale-95 transition-all shadow-sm disabled:opacity-50"
                   >
                     {submitting ? 'Scheduling...' : 'Create task'}

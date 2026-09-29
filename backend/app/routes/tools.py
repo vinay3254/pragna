@@ -164,6 +164,21 @@ class ScheduledTaskRequest(BaseModel):
     conversation_id: Optional[str] = None
 
 
+class SchedulePreviewRequest(BaseModel):
+    text: str
+    timezone: Optional[str] = None
+
+
+@router.post("/api/tools/scheduled/preview")
+async def preview_schedule(body: SchedulePreviewRequest, current_user: dict = Depends(get_optional_current_user)):
+    """Parse a natural-language schedule so the UI can show "Next run" before saving."""
+    from app import cron_service
+    parsed = cron_service.parse_schedule_text(body.text, body.timezone)
+    if not parsed:
+        return {"found": False}
+    return {"found": True, **parsed}
+
+
 @router.post("/api/scheduled-tasks")
 @router.post("/api/tools/scheduled")
 async def post_scheduled_task(
