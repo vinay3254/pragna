@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
-import { AGENT_TOOLS_SCHEMA, executeTool } from '@/lib/agent-tools';
+import { AGENT_TOOLS_SCHEMA, executeTool, imageToImage } from '@/lib/agent-tools';
+import { needsLiveSearch, needsTools } from '@/lib/tool-routing';
 import { INDIAN_LANGUAGE_MAP } from '@/lib/indianLanguages';
 import { getModelConfig } from '@/lib/modelDisplayNames';
 import { getMcpToolSchemas } from '@/lib/mcpClient';
@@ -340,10 +341,26 @@ async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: stri
   const lastMsg = (messages[messages.length - 1]?.content || '').trim();
   if (!lastMsg) return null;
 
-  // Real-time live search runs on every user chat query
-  let query = lastMsg.slice(0, 200).trim();
+  // Live search adds seconds to every reply, so only run it when the message needs fresh information.
+  if (!needsLiveSearch(lastMsg)) return null;
+  const query = lastMsg.slice(0, 200).trim();
   if (!query) return null;
 
+  // Cap the wait: a slow search provider must not stall the answer. A timeout means "answer without search".
+  const SEARCH_BUDGET_MS = 4000;
+  const timedOut = Symbol('search-timeout');
+  const guarded = await Promise.race([
+    runWebSearch(lastMsg, query),
+    new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), SEARCH_BUDGET_MS)),
+  ]);
+  if (guarded === timedOut) {
+    console.warn(`[Chat API] web search exceeded ${SEARCH_BUDGET_MS}ms for "${query}", answering without it`);
+    return null;
+  }
+  return guarded;
+}
+
+async function runWebSearch(lastMsg: string, query: string): Promise<{ query: string; resultsText: string; failed?: boolean }> {
   try {
     let searchRes = await executeTool('web_search', { query });
     if (searchRes && Array.isArray(searchRes.results) && searchRes.results.length > 0) {
@@ -379,7 +396,63 @@ async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: stri
   }
 }
 
-async function detectAndExecuteImageGeneration(messages: any[]): Promise<{ prompt: string; imageUrl: string; markdown: string } | null> {
+// Links of images this app actually saved. The model sometimes invents /generated_images/ links, so check the disk.
+function existingGeneratedImage(candidates: string[]): string | null {
+  const baseDir = process.cwd().endsWith('frontend') ? process.cwd() : path.join(process.cwd(), 'frontend');
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const name = path.basename(candidates[i]);
+    if (fs.existsSync(path.join(baseDir, 'public', 'generated_images', name))) return candidates[i];
+  }
+  return null;
+}
+
+// The picture an edit request refers to: the photo attached to the latest message, else the newest generated image.
+function findSourceImage(messages: any[]): string | null {
+  const last = messages[messages.length - 1];
+  if (Array.isArray(last?.images) && last.images.length > 0) return last.images[last.images.length - 1];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const found = existingGeneratedImage(String(messages[i]?.content || '').match(/\/generated_images\/[\w.-]+/g) || []);
+    if (found) return found;
+  }
+  return null;
+}
+
+// The message asks to change a picture: either a photo attached to it, or the image generated a moment ago.
+async function detectAndExecuteImageEdit(messages: any[]): Promise<{ prompt: string; imageUrl?: string; markdown?: string; error?: string } | null> {
+  const last = messages[messages.length - 1];
+  const text = String(last?.content || '').trim();
+  if (!text) return null;
+  if (/^(what|who|where|when|why|how|describe|explain|read|analy[sz]e|tell me|is |are |does |do |can you (see|tell|read|describe))\b/i.test(text)) return null;
+
+  const attached = Array.isArray(last?.images) && last.images.length > 0 ? last.images[last.images.length - 1] : null;
+  let source: string | null = attached;
+
+  if (attached) {
+    const editIntent = /\b(edit|change|modify|make|turn|convert|transform|restyle|redraw|re-?colou?r|colou?rize|remove|replace|add|enhance|upscale|cartoon|anime|ghibli|painting|sketch|watercolou?r|pixel|oil paint|3d|style|background|filter)\b/i;
+    if (!editIntent.test(text)) return null;
+  } else {
+    // Follow-up like "make it black" right after an image was generated.
+    let shown: string | null = null;
+    for (const m of messages.slice(-6, -1).reverse()) {
+      shown = existingGeneratedImage(String(m?.content || '').match(/\/generated_images\/[\w.-]+/g) || []);
+      if (shown) break;
+    }
+    if (!shown) return null;
+    const startsWithEditVerb = /^(please\s+)?(can you\s+|could you\s+)?(make|turn|change|edit|convert|transform|add|remove|replace|re-?colou?r|colou?rize|paint|redo|redraw|give|put|use)\b/i.test(text);
+    const refersToImage = /\b(it|this|that|him|her|them|the (image|picture|photo|background|lion|animal|subject))\b/i.test(text);
+    const wantsNewImage = /\b(new|another|different|fresh)\b.*\b(image|picture|photo)\b|\b(image|picture|photo|drawing|illustration)\s+of\b/i.test(text);
+    const short = text.split(/\s+/).length <= 14;
+    if (!(startsWithEditVerb && refersToImage && short) || wantsNewImage) return null;
+    source = shown;
+  }
+  if (!source) return null;
+
+  const result = await imageToImage({ image: source, prompt: text });
+  if (result.success) return { prompt: text, imageUrl: result.imageUrl, markdown: result.markdown };
+  return { prompt: text, error: result.error || 'Image editing failed.' };
+}
+
+async function detectAndExecuteImageGeneration(messages: any[]): Promise<{ prompt: string; imageUrl?: string; markdown?: string; error?: string } | null> {
   if (!messages || messages.length === 0) return null;
   const lastMsg = (messages[messages.length - 1]?.content || '').trim();
   if (!lastMsg) return null;
@@ -423,10 +496,11 @@ async function detectAndExecuteImageGeneration(messages: any[]): Promise<{ promp
         markdown: res.markdown || `![${prompt}](${imgUrl})`,
       };
     }
-  } catch (err) {
+    return { prompt, error: res?.error || 'The image service returned no image.' };
+  } catch (err: any) {
     console.warn('detectAndExecuteImageGeneration error:', err);
+    return { prompt, error: err?.message || 'Image generation failed.' };
   }
-  return null;
 }
 
 async function detectAndExecuteDocumentGeneration(messages: any[]): Promise<{ title: string; format: string; downloadUrl: string; filename: string } | null> {
@@ -669,8 +743,25 @@ function sanitizeForLlm(text: string): string {
   return text.replace(/data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]{50,}/g, '[image data]');
 }
 
-    // Direct Image Generation resolution
-    const autoImage = await detectAndExecuteImageGeneration(messages);
+    // Image-to-image: a photo attached with an edit instruction. Text-to-image only runs when no edit was attempted.
+    const imageAttempt = (await detectAndExecuteImageEdit(messages).catch(() => null)) ?? (await detectAndExecuteImageGeneration(messages));
+    if (imageAttempt?.error) {
+      // Without this the model invents a picture and describes it as if it existed.
+      const editing = hasImages || /^(please\s+)?(can you\s+|could you\s+)?(make|turn|change|edit|convert|transform|add|remove|replace|re-?colou?r|colou?rize|paint|redo|redraw|give|put|use)\b/i.test(String(messages[messages.length - 1]?.content || ''));
+      conversationHistory.push({
+        role: 'system',
+        content: `[IMAGE ${editing ? 'EDIT' : 'GENERATION'} FAILED]: The ${editing ? 'image editing' : 'image generation'} service failed: ${imageAttempt.error}\nTell the user plainly that no image was created and give the short reason. Do NOT write an image markdown tag, do NOT describe an image, and do NOT claim one exists. Offer to try again later.`,
+      });
+    }
+    if (!imageAttempt && messages.some((m: any) => /\/generated_images\//.test(String(m?.content || '')))) {
+      conversationHistory.push({
+        role: 'system',
+        content: 'Pictures are made only by the image tools, never by you. Do not write markdown image tags or invent image URLs. If the user wants a picture changed or created, tell them to describe the change, and do not claim an image exists.',
+      });
+    }
+    const autoImage = imageAttempt?.imageUrl
+      ? { prompt: imageAttempt.prompt, imageUrl: imageAttempt.imageUrl, markdown: imageAttempt.markdown || '' }
+      : null;
     if (autoImage) {
       conversationHistory.push({
         role: 'system',
@@ -918,7 +1009,8 @@ CRITICAL MANDATORY INSTRUCTIONS:
         try {
           const MAX_ROUNDS = 5;
           let streamedSuccess = false;
-          let toolsEnabled = enableTools !== false;
+          // Skip the tool schema and tool loop for messages that only need a plain answer.
+          let toolsEnabled = enableTools !== false && needsTools(lastUserMessage);
           let lastError = '';
 
           // 1. OmniRoute Gateway (Primary) — routes to best coding model
@@ -975,7 +1067,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
                   const toolName = tc.function?.name;
                   let toolArgs: Record<string, any> = {};
                   try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch {}
-                  const result = await executeTool(toolName, toolArgs, userAuthToken);
+                  const result = await executeTool(toolName, toolName === 'edit_image' && !toolArgs.image ? { ...toolArgs, image: findSourceImage(messages) } : toolArgs, userAuthToken);
                   conversationHistory.push({ role: 'tool', tool_call_id: tc.id || `call_${round}_${idx}`, name: toolName, content: JSON.stringify(result) });
                 }
               }
@@ -1056,7 +1148,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
               if (typeof toolArgs === 'string') {
                 try { toolArgs = JSON.parse(toolArgs); } catch { toolArgs = {}; }
               }
-              const result = await executeTool(toolName, toolArgs, userAuthToken);
+              const result = await executeTool(toolName, toolName === 'edit_image' && !toolArgs.image ? { ...toolArgs, image: findSourceImage(messages) } : toolArgs, userAuthToken);
               let toolContent = JSON.stringify(result);
               if (toolContent.length > 20000) {
                 toolContent = toolContent.replace(/data:[^;]+;base64,[A-Za-z0-9+/=]+/g, '[binary data omitted]').slice(0, 20000);

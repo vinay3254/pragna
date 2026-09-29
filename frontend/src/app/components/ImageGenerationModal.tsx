@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState } from 'react';
-import { X, Sparkles, Image as ImageIcon, Download, Copy, Check, ExternalLink } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { X, Sparkles, Image as ImageIcon, Download, Copy, Check, ExternalLink, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 
 export interface ImageModelOption {
@@ -14,18 +14,25 @@ export interface ImageModelOption {
 
 export const IMAGE_MODELS: ImageModelOption[] = [
   {
-    id: 'aihorde/stable_diffusion',
-    name: 'Stable Diffusion Turbo',
-    badge: 'Fast (~6s)',
-    description: 'High worker concurrency, rapid generation with zero watermark.',
-    category: 'Diffusion',
-  },
-  {
     id: 'antigravity/gemini-3.1-flash-image',
     name: 'Gemini 3.1 Flash Image',
     badge: 'Google AI',
     description: 'Native photorealistic rendering with Gemini engine.',
     category: 'Gemini',
+  },
+  {
+    id: 'codex/gpt-5.6-terra',
+    name: 'GPT Image (Terra)',
+    badge: 'Codex',
+    description: 'ChatGPT-plan image model. Slower (about 40s) but reliable backup.',
+    category: 'OpenAI',
+  },
+  {
+    id: 'codex/gpt-5.6-luna',
+    name: 'GPT Image (Luna)',
+    badge: 'Codex',
+    description: 'Second ChatGPT-plan image model.',
+    category: 'OpenAI',
   },
   {
     id: 'aihorde/AlbedoBase XL (SDXL)',
@@ -50,6 +57,29 @@ export const IMAGE_MODELS: ImageModelOption[] = [
   },
 ];
 
+// Shrink big photos before upload so the request stays small; keeps aspect ratio.
+async function fileToDataUrl(file: File, maxSide = 1536): Promise<string> {
+  const original = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('Could not read the file'));
+    reader.readAsDataURL(file);
+  });
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new window.Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('That file is not a readable image'));
+    el.src = original;
+  });
+  const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+  if (scale === 1 && file.size < 4 * 1024 * 1024) return original;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  canvas.getContext('2d')?.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.9);
+}
+
 interface ImageGenerationModalProps {
   open: boolean;
   onClose: () => void;
@@ -63,8 +93,26 @@ export default function ImageGenerationModal({ open, onClose, onInsertToChat }: 
   const [loading, setLoading] = useState(false);
   const [resultImage, setResultImage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [refImage, setRefImage] = useState<string | null>(null);
+  const [similarity, setSimilarity] = useState(0.5);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!open) return null;
+
+  const handleFile = async (file?: File | null) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please choose an image file');
+      return;
+    }
+    try {
+      setRefImage(await fileToDataUrl(file));
+      setResultImage(null);
+    } catch (err: any) {
+      toast.error(err?.message || 'Could not load that image');
+    }
+  };
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -81,18 +129,19 @@ export default function ImageGenerationModal({ open, onClose, onInsertToChat }: 
           prompt: prompt.trim(),
           model: selectedModel,
           aspect_ratio: aspectRatio,
+          ...(refImage ? { image: refImage, similarity } : {}),
         }),
       });
 
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error('Image generation failed');
+        throw new Error(data?.result?.error || data?.error || (refImage ? 'Image transformation failed' : 'Image generation failed'));
       }
 
-      const data = await res.json();
       const imgUrl = data?.result?.imageUrl || data?.result?.image_url;
       if (imgUrl) {
         setResultImage(imgUrl);
-        toast.success('Image generated successfully!');
+        toast.success(refImage ? 'Image transformed!' : 'Image generated successfully!');
       } else {
         throw new Error(data?.result?.error || 'No image returned');
       }
@@ -145,15 +194,86 @@ export default function ImageGenerationModal({ open, onClose, onInsertToChat }: 
         <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 md:grid-cols-2 gap-6 min-h-0">
           {/* Controls Form */}
           <form onSubmit={handleGenerate} className="flex flex-col gap-4">
+            {/* Reference image (image-to-image) */}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Start from a photo <span className="normal-case font-normal">(optional)</span>
+              </label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  handleFile(e.target.files?.[0]);
+                  e.target.value = '';
+                }}
+              />
+              {refImage ? (
+                <div className="flex items-center gap-3 p-2 rounded-xl border border-primary/40 bg-primary/5">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={refImage} alt="Reference" className="w-16 h-16 object-cover rounded-lg border border-border/50" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-foreground">Image to image</p>
+                    <p className="text-[11px] text-muted-foreground">Your prompt describes how to change this photo.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setRefImage(null)}
+                    className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                    title="Remove photo"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOver(false);
+                    handleFile(e.dataTransfer.files?.[0]);
+                  }}
+                  className={`flex items-center justify-center gap-2 py-4 rounded-xl border border-dashed text-xs transition-colors ${
+                    dragOver ? 'border-primary bg-primary/10 text-primary' : 'border-border/60 text-muted-foreground hover:border-primary/50 hover:text-foreground'
+                  }`}
+                >
+                  <Upload size={15} />
+                  <span>Upload or drop a photo to transform it</span>
+                </button>
+              )}
+              {refImage && (
+                <div className="flex flex-col gap-1 pt-1">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span>Change more</span>
+                    <span>Stay closer to original</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.1}
+                    max={0.9}
+                    step={0.05}
+                    value={similarity}
+                    onChange={(e) => setSimilarity(Number(e.target.value))}
+                    className="w-full accent-[#d4af37]"
+                    aria-label="How close to the original"
+                  />
+                </div>
+              )}
+            </div>
+
             {/* Prompt input */}
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Prompt Description
+                {refImage ? 'What should change?' : 'Prompt Description'}
               </label>
               <textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Describe your scene in detail (e.g. A cybernetic owl perched on a neon cable in rainy Neo-Tokyo, octane render, 8k)..."
+                placeholder={refImage ? 'e.g. Turn this into a watercolor painting, keep the composition' : 'Describe your scene in detail (e.g. A cybernetic owl perched on a neon cable in rainy Neo-Tokyo, octane render, 8k)...'}
                 rows={4}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-background border border-border/60 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all resize-none"
                 required
@@ -161,6 +281,7 @@ export default function ImageGenerationModal({ open, onClose, onInsertToChat }: 
             </div>
 
             {/* Model Selector */}
+            {!refImage && (
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Model Engine
@@ -191,7 +312,10 @@ export default function ImageGenerationModal({ open, onClose, onInsertToChat }: 
               </div>
             </div>
 
+            )}
+
             {/* Aspect Ratio */}
+            {!refImage && (
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Aspect Ratio
@@ -214,6 +338,8 @@ export default function ImageGenerationModal({ open, onClose, onInsertToChat }: 
               </div>
             </div>
 
+            )}
+
             {/* Generate Button */}
             <button
               type="submit"
@@ -223,12 +349,12 @@ export default function ImageGenerationModal({ open, onClose, onInsertToChat }: 
               {loading ? (
                 <>
                   <div className="w-4 h-4 border-2 border-[#1a1405] border-t-transparent rounded-full animate-spin" />
-                  <span>Synthesizing Image...</span>
+                  <span>{refImage ? 'Transforming...' : 'Synthesizing Image...'}</span>
                 </>
               ) : (
                 <>
                   <Sparkles size={16} className="text-[#1a1405]" strokeWidth={2.5} />
-                  <span>Generate Image</span>
+                  <span>{refImage ? 'Transform Image' : 'Generate Image'}</span>
                 </>
               )}
             </button>
