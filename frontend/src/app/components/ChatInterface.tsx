@@ -543,7 +543,7 @@ export default function ChatInterface() {
           sourceDocumentIds: effectiveSources.length ? effectiveSources.map(s => s.id) : undefined,
           preferredLanguage: effectiveLang !== 'auto' ? effectiveLang : undefined,
         }),
-        signal: AbortSignal.timeout(90000),
+        signal: AbortSignal.timeout(180000),
       });
 
       if (response.ok && response.body) {
@@ -554,11 +554,25 @@ export default function ChatInterface() {
         let pendingDelta = '';
         let pendingCitations: any[] | null = null;
         let lastFlush = Date.now();
+        // Status text (e.g. "Creating image…") shown until the first real text replaces it.
+        let statusShown = false;
+
+        const showStatus = (status: string) => {
+          statusShown = true;
+          setConversations(prev =>
+            prev.map(c => c.id !== convId ? c : {
+              ...c,
+              messages: c.messages.map(m => m.id !== assistantMessageId ? m : { ...m, content: `_${status}_`, isStreaming: true }),
+            })
+          );
+        };
 
         const flushStream = () => {
           if (!pendingDelta && !pendingCitations) return;
           const deltaToFlush = pendingDelta;
           const citationsToFlush = pendingCitations;
+          const replaceStatus = statusShown && !!deltaToFlush;
+          if (replaceStatus) statusShown = false;
           pendingDelta = '';
           pendingCitations = null;
 
@@ -571,7 +585,7 @@ export default function ChatInterface() {
                   if (m.id !== assistantMessageId) return m;
                   return {
                     ...m,
-                    content: m.content + deltaToFlush,
+                    content: (replaceStatus ? '' : m.content) + deltaToFlush,
                     ...(citationsToFlush ? { citations: citationsToFlush } : {}),
                     isStreaming: true,
                   };
@@ -603,6 +617,7 @@ export default function ChatInterface() {
                 if (Array.isArray(data.citations) && data.citations.length > 0) {
                   pendingCitations = data.citations;
                 }
+                if (typeof data.status === 'string' && !streamedAny) showStatus(data.status);
               } catch {
                 // Ignore chunk parse error
               }

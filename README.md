@@ -334,6 +334,13 @@ npm run build
 
 ---
 
+## Contributors
+
+- **Vinay G K** ([@vinay3254](https://github.com/vinay3254)) — Lead Developer & Maintainer
+- **Reshma Banu** ([@reshmabanu2823](https://github.com/reshmabanu2823)) — Contributor
+
+---
+
 ## License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

@@ -2132,14 +2132,14 @@ export async function executeTool(name: string, args: Record<string, any>, authT
         const requestedModel = args.model;
         const modelsToTry: string[] = [];
         let omniFailure = '';
-        // Gemini through OmniRoute first; a model picked in Image Studio is tried instead.
+        // Codex first for now (Gemini keeps hanging); a model picked in Image Studio is tried instead.
         if (requestedModel) {
           modelsToTry.push(requestedModel);
           if (requestedModel.includes('gemini')) modelsToTry.push('codex/gpt-5.6-terra', 'codex/gpt-5.6-luna');
         } else {
-          if (Date.now() >= geminiQuotaBlockedUntil) modelsToTry.push('antigravity/gemini-3.1-flash-image');
-          // Codex (ChatGPT plan) is used for images only, as the backup when Gemini has no capacity.
+          // Codex (ChatGPT plan) is used for images only.
           modelsToTry.push('codex/gpt-5.6-terra', 'codex/gpt-5.6-luna');
+          if (Date.now() >= geminiQuotaBlockedUntil) modelsToTry.push('antigravity/gemini-3.1-flash-image');
         }
 
         {
@@ -2157,7 +2157,7 @@ export async function executeTool(name: string, args: Record<string, any>, authT
                     'Content-Type': 'application/json',
                   },
                   body: JSON.stringify(payload),
-                  signal: AbortSignal.timeout(m.includes('aihorde') ? 20000 : m.startsWith('codex/') ? 120000 : 60000),
+                  signal: AbortSignal.timeout(m.includes('aihorde') ? 20000 : m.startsWith('codex/') ? 120000 : 35000),
                 });
               let res = await send();
               // Google answers 503 "No capacity" for Gemini image when it is busy; that clears on its own, so retry.

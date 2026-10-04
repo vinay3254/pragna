@@ -7,7 +7,7 @@
 const GREETING = /^(hi|hii+|hello|hey|greetings|good (morning|evening|afternoon|night)|howdy|sup|thanks|thank you|thx|bye|goodbye|ok|okay|cool|nice|great|yes|no|yep|nope)[!.? ]*$/i;
 
 const IMAGE_REQUEST =
-  /\b(generate|create|draw|make|render|paint|produce|give me|show me)\b.*\b(image|picture|photo|illustration|drawing|painting|artwork|graphic|portrait|wallpaper|sketch|logo)\b/i;
+  /\b(generate|create|draw|make|design|render|paint|produce|give me|show me)\b.*\b(image|picture|photo|illustration|drawing|painting|artwork|graphic|portrait|wallpaper|sketch|logo|icon|poster|banner|avatar|emblem|mockup|thumbnail|cartoon|meme)\b/i;
 
 const DATE_TIME_QUESTION =
   /^\W*(what('s|s| is| was)?|tell me)\s+(the\s+)?(current\s+|today'?s?\s+)?(date|time|day)(\s+and\s+(date|time|day))?(\s+(now|today|right now))?\W*$/i;

@@ -418,7 +418,7 @@ function findSourceImage(messages: any[]): string | null {
 }
 
 // The message asks to change a picture: either a photo attached to it, or the image generated a moment ago.
-async function detectAndExecuteImageEdit(messages: any[]): Promise<{ prompt: string; imageUrl?: string; markdown?: string; error?: string } | null> {
+async function detectAndExecuteImageEdit(messages: any[], onStart?: () => void): Promise<{ prompt: string; imageUrl?: string; markdown?: string; error?: string } | null> {
   const last = messages[messages.length - 1];
   const text = String(last?.content || '').trim();
   if (!text) return null;
@@ -433,13 +433,19 @@ async function detectAndExecuteImageEdit(messages: any[]): Promise<{ prompt: str
   } else {
     // Follow-up like "make it black" right after an image was generated.
     let shown: string | null = null;
-    for (const m of messages.slice(-6, -1).reverse()) {
-      shown = existingGeneratedImage(String(m?.content || '').match(/\/generated_images\/[\w.-]+/g) || []);
-      if (shown) break;
+    let shownAt = -1;
+    for (let i = messages.length - 2; i >= Math.max(0, messages.length - 6); i--) {
+      shown = existingGeneratedImage(String(messages[i]?.content || '').match(/\/generated_images\/[\w.-]+/g) || []);
+      if (shown) { shownAt = i; break; }
     }
     if (!shown) return null;
     const startsWithEditVerb = /^(please\s+)?(can you\s+|could you\s+)?(make|turn|change|edit|convert|transform|add|remove|replace|re-?colou?r|colou?rize|paint|redo|redraw|give|put|use)\b/i.test(text);
-    const refersToImage = /\b(it|this|that|him|her|them|the (image|picture|photo|background|lion|animal|subject))\b/i.test(text);
+    // "make pig blue": the follow-up names the subject from the prompt that produced the image.
+    const imagePrompt = String(messages.slice(0, shownAt).reverse().find((m: any) => m?.role === 'user')?.content || '');
+    const subjectWords = (imagePrompt.toLowerCase().match(/[a-z]{3,}/g) || [])
+      .filter(w => !/^(make|generate|create|draw|render|paint|produce|give|show|image|picture|photo|illustration|the|and|with|for|of|please|can|you|could|me)$/.test(w));
+    const namesSubject = subjectWords.some(w => new RegExp(`\\b${w}s?\\b`, 'i').test(text));
+    const refersToImage = namesSubject || /\b(it|this|that|him|her|them|the (image|picture|photo|background|lion|animal|subject))\b/i.test(text);
     const wantsNewImage = /\b(new|another|different|fresh)\b.*\b(image|picture|photo)\b|\b(image|picture|photo|drawing|illustration)\s+of\b/i.test(text);
     const short = text.split(/\s+/).length <= 14;
     if (!(startsWithEditVerb && refersToImage && short) || wantsNewImage) return null;
@@ -447,19 +453,20 @@ async function detectAndExecuteImageEdit(messages: any[]): Promise<{ prompt: str
   }
   if (!source) return null;
 
+  onStart?.();
   const result = await imageToImage({ image: source, prompt: text });
   if (result.success) return { prompt: text, imageUrl: result.imageUrl, markdown: result.markdown };
   return { prompt: text, error: result.error || 'Image editing failed.' };
 }
 
-async function detectAndExecuteImageGeneration(messages: any[]): Promise<{ prompt: string; imageUrl?: string; markdown?: string; error?: string } | null> {
+async function detectAndExecuteImageGeneration(messages: any[], onStart?: () => void): Promise<{ prompt: string; imageUrl?: string; markdown?: string; error?: string } | null> {
   if (!messages || messages.length === 0) return null;
   const lastMsg = (messages[messages.length - 1]?.content || '').trim();
   if (!lastMsg) return null;
 
   // Check for image generation phrases
-  const isImageRequest = /\b(generate|create|draw|make|render|paint|produce|give me|show me)\b.*\b(image|picture|photo|illustration|drawing|painting|artwork|graphic|portrait|wallpaper|sketch)\b/i.test(lastMsg)
-    || /\b(image|picture|photo|illustration|drawing|painting)\s+of\b/i.test(lastMsg)
+  const isImageRequest = /\b(generate|create|draw|make|design|render|paint|produce|give me|show me)\b.*\b(image|picture|photo|illustration|drawing|painting|artwork|graphic|portrait|wallpaper|sketch|logo|icon|poster|banner|avatar|emblem|mockup|thumbnail|cartoon|meme)\b/i.test(lastMsg)
+    || /\b(image|picture|photo|illustration|drawing|painting|logo|poster|banner|avatar)\s+(of|for)\b/i.test(lastMsg)
     || /^draw\s+/i.test(lastMsg);
 
   // Exclude requests to write code or generic file queries
@@ -487,6 +494,7 @@ async function detectAndExecuteImageGeneration(messages: any[]): Promise<{ promp
   else if (/\b(3:4)\b/i.test(lastMsg)) aspectRatio = '3:4';
 
   try {
+    onStart?.();
     const res = await executeTool('image_generate', { prompt, aspect_ratio: aspectRatio });
     const imgUrl = res?.image_url || res?.imageUrl;
     if (res && res.success && imgUrl) {
@@ -743,39 +751,6 @@ function sanitizeForLlm(text: string): string {
   return text.replace(/data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]{50,}/g, '[image data]');
 }
 
-    // Image-to-image: a photo attached with an edit instruction. Text-to-image only runs when no edit was attempted.
-    const imageAttempt = (await detectAndExecuteImageEdit(messages).catch(() => null)) ?? (await detectAndExecuteImageGeneration(messages));
-    if (imageAttempt?.error) {
-      // Without this the model invents a picture and describes it as if it existed.
-      const editing = hasImages || /^(please\s+)?(can you\s+|could you\s+)?(make|turn|change|edit|convert|transform|add|remove|replace|re-?colou?r|colou?rize|paint|redo|redraw|give|put|use)\b/i.test(String(messages[messages.length - 1]?.content || ''));
-      conversationHistory.push({
-        role: 'system',
-        content: `[IMAGE ${editing ? 'EDIT' : 'GENERATION'} FAILED]: The ${editing ? 'image editing' : 'image generation'} service failed: ${imageAttempt.error}\nTell the user plainly that no image was created and give the short reason. Do NOT write an image markdown tag, do NOT describe an image, and do NOT claim one exists. Offer to try again later.`,
-      });
-    }
-    if (!imageAttempt && messages.some((m: any) => /\/generated_images\//.test(String(m?.content || '')))) {
-      conversationHistory.push({
-        role: 'system',
-        content: 'Pictures are made only by the image tools, never by you. Do not write markdown image tags or invent image URLs. If the user wants a picture changed or created, tell them to describe the change, and do not claim an image exists.',
-      });
-    }
-    const autoImage = imageAttempt?.imageUrl
-      ? { prompt: imageAttempt.prompt, imageUrl: imageAttempt.imageUrl, markdown: imageAttempt.markdown || '' }
-      : null;
-    if (autoImage) {
-      conversationHistory.push({
-        role: 'system',
-        content: `[IMAGE GENERATION RESULT for "${autoImage.prompt}"]:\nAn image has been successfully generated for the user's request.
-Image URL: ${autoImage.imageUrl}
-Image Markdown: ${autoImage.markdown}
-
-CRITICAL INSTRUCTIONS:
-- Present the image to the user using this exact markdown tag: ${autoImage.markdown}
-- Briefly describe the visual atmosphere of the generated image.
-- Do NOT output '[image data]' or placeholder tokens.`,
-      });
-    }
-
     // Direct Document Generation resolution (PDF, Word DOCX, Excel XLSX, PowerPoint PPTX)
     const autoDoc = await detectAndExecuteDocumentGeneration(messages);
     if (autoDoc) {
@@ -833,6 +808,45 @@ CRITICAL MANDATORY INSTRUCTIONS:
       }
     }
 
+    // Runs inside the stream so the client can show a status while the picture is made (often 30-75s).
+    const runImageStep = async (onImageStart: (editing: boolean) => void) => {
+      // Image-to-image: a photo attached with an edit instruction. Text-to-image only runs when no edit was attempted.
+      const imageStart = Date.now();
+      const imageAttempt = (await detectAndExecuteImageEdit(messages, () => onImageStart(true)).catch(() => null)) ?? (await detectAndExecuteImageGeneration(messages, () => onImageStart(false)));
+      if (imageAttempt) console.log(`[Chat API] image step ${Date.now() - imageStart}ms: ${imageAttempt.imageUrl || 'FAILED ' + String(imageAttempt.error).slice(0, 300)}`);
+      if (imageAttempt?.error) {
+        // Without this the model invents a picture and describes it as if it existed.
+        const editing = hasImages || /^(please\s+)?(can you\s+|could you\s+)?(make|turn|change|edit|convert|transform|add|remove|replace|re-?colou?r|colou?rize|paint|redo|redraw|give|put|use)\b/i.test(String(messages[messages.length - 1]?.content || ''));
+        conversationHistory.push({
+          role: 'system',
+          content: `[IMAGE ${editing ? 'EDIT' : 'GENERATION'} FAILED]: The ${editing ? 'image editing' : 'image generation'} service failed: ${imageAttempt.error}\nTell the user plainly that no image was created and give the short reason. Do NOT write an image markdown tag, do NOT describe an image, and do NOT claim one exists. Offer to try again later.`,
+        });
+      }
+      if (!imageAttempt) {
+        conversationHistory.push({
+          role: 'system',
+          content: 'Pictures are made only by the image tools, never by you. Do not write markdown image tags or invent image URLs. If the user wants a picture changed or created, tell them to describe the change, and do not claim an image exists.',
+        });
+      }
+      const autoImage = imageAttempt?.imageUrl
+        ? { prompt: imageAttempt.prompt, imageUrl: imageAttempt.imageUrl, markdown: imageAttempt.markdown || '' }
+        : null;
+      if (autoImage) {
+        conversationHistory.push({
+          role: 'system',
+          content: `[IMAGE GENERATION RESULT for "${autoImage.prompt}"]:\nAn image has been successfully generated for the user's request.
+Image URL: ${autoImage.imageUrl}
+Image Markdown: ${autoImage.markdown}
+
+CRITICAL INSTRUCTIONS:
+- Present the image to the user using this exact markdown tag: ${autoImage.markdown}
+- Briefly describe the visual atmosphere of the generated image.
+- Do NOT output '[image data]' or placeholder tokens.`,
+        });
+      }
+      return autoImage;
+    };
+
     const stream = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
@@ -847,6 +861,14 @@ CRITICAL MANDATORY INSTRUCTIONS:
           assistantResponseText += text;
           controller.enqueue(encoder.encode(sseChunk(text)));
         };
+
+        // A status line the client shows until the first real text arrives.
+        const autoImage = await runImageStep((editing) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ status: editing ? 'Editing image… this can take about a minute.' : 'Creating image… this can take about a minute.' })}\n\n`));
+        }).catch((err) => {
+          console.warn('[Chat API] image step crashed:', err);
+          return null;
+        });
 
         const OLLAMA_CHAT_URL = 'https://api.ollama.com/api/chat';
 
@@ -1020,6 +1042,8 @@ CRITICAL MANDATORY INSTRUCTIONS:
               const omniUrl = 'http://127.0.0.1:20128/v1/chat/completions';
               let omniModel = mapOmnirouteModel(model);
               for (let round = 0; round < MAX_ROUNDS; round++) {
+                // The last round runs without tools so the model has to write a final answer.
+                const withTools = toolsEnabled && round < MAX_ROUNDS - 1;
                 const post = (m: string) =>
                   fetch(omniUrl, {
                     method: 'POST',
@@ -1027,7 +1051,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
                     body: JSON.stringify({
                       model: m,
                       messages: toOpenAIMessages(conversationHistory),
-                      ...(toolsEnabled ? { tools: fullToolsSchema, tool_choice: 'auto' } : {}),
+                      ...(withTools ? { tools: fullToolsSchema, tool_choice: 'auto' } : {}),
                       temperature,
                       max_tokens: 1500,
                       stream: true,
@@ -1041,6 +1065,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
                   console.warn('Omniroute request failed:', netErr.message);
                 }
                 if (res && !res.ok && omniModel !== 'auto/best-free') {
+                  console.warn(`[Chat API] OmniRoute ${omniModel} returned ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
                   omniModel = 'auto/best-free';
                   try { res = await post(omniModel); } catch {}
                 }
@@ -1067,6 +1092,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
                   const toolName = tc.function?.name;
                   let toolArgs: Record<string, any> = {};
                   try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+                  console.log(`[Chat API] OmniRoute round ${round} tool: ${toolName} ${tc.function?.arguments?.slice(0, 120) ?? ''}`);
                   const result = await executeTool(toolName, toolName === 'edit_image' && !toolArgs.image ? { ...toolArgs, image: findSourceImage(messages) } : toolArgs, userAuthToken);
                   conversationHistory.push({ role: 'tool', tool_call_id: tc.id || `call_${round}_${idx}`, name: toolName, content: JSON.stringify(result) });
                 }
