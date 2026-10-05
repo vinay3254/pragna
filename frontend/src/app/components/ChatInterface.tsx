@@ -321,18 +321,6 @@ export default function ChatInterface() {
 
   const activeConversation = conversations.find(c => c.id === activeConversationId) ?? null;
 
-  const attachSource = useCallback((source: Source) => {
-    setConversations(prev => {
-      const updated = prev.map(c => {
-        if (c.id !== activeConversationIdRef.current) return c;
-        if (c.sources?.some(s => s.id === source.id)) return c;
-        return { ...c, sources: [...(c.sources || []), source] };
-      });
-      saveConversations(userRef.current, updated);
-      return updated;
-    });
-  }, []);
-
   const removeSource = useCallback((sourceId: number) => {
     setConversations(prev => {
       const updated = prev.map(c => {
@@ -440,6 +428,7 @@ export default function ChatInterface() {
       content,
       timestamp: new Date().toISOString(),
       images,
+      files: newSources?.length ? newSources.map(s => s.filename) : undefined,
     };
 
     // Add user message
@@ -741,7 +730,6 @@ export default function ChatInterface() {
           onOpenCommandPalette={() => setCmdPaletteOpen(true)}
           onOpenTools={() => setToolsPanelOpen(true)}
           sources={activeConversation?.sources}
-          onAttachSource={attachSource}
           onRemoveSource={removeSource}
           selectedLanguage={selectedLanguage}
           onSelectLanguage={handleSelectLanguage}

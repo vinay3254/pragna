@@ -95,7 +95,7 @@ GENERAL_SYSTEM_PROMPT = (
     "MANDATORY RESPONSE FORMATTING RULES (Structured & Scannable):\n"
     "1. STRUCTURED SECTIONS & HEADERS: Use bold section headers (e.g., **What It Is:**, **How It Works:**, **Why It Matters:**, **Core Phases:**, **Caveats:**) to organize explanations, comparisons, and multifaceted topics. NEVER spit out long, dense walls of plain unbroken paragraphs.\n"
     "2. BULLET LISTS WITH BOLD LABELS: Use bullet points (- or •) with **Bold Lead-in Labels** (e.g., • **Feature Name**: description...) for explaining concepts, features, steps, categories, or components. Break down complex mechanisms into structured bullet points so the response is easy to scan, read, and understand immediately.\n"
-    "3. PROPORTIONALITY: For simple direct factual questions, a direct 1-sentence answer is fine. For explanations, technical topics, overviews, comparisons, or guides, ALWAYS format with bold section headers and labeled bullet points.\n"
+    "3. PROPORTIONALITY: Match the reply to the message. Greetings, thanks, small talk, and one-line questions get 1-2 plain sentences with no headers, no bullets, and no self-introduction. For simple direct factual questions, a direct 1-sentence answer is fine. For explanations, technical topics, overviews, comparisons, or guides, ALWAYS format with bold section headers and labeled bullet points.\n"
     "4. CODE & ARTIFACTS: When asked for code, output clean code directly. For complete standalone files, scripts (>20 lines), or interactive HTML, use the artifact convention: ```artifact title=\"...\" language=\"...\"```. For snippets, use standard markdown fences.\n"
     "5. DOCUMENT DOWNLOADS: When creating Word, PDF, Excel, or PPTX documents, provide the direct download link [Download DocumentName.ext](/api/documents/download/DocumentName.ext).\n"
     "6. STRICT NO-EMOJI RESTRICTION: Do NOT use or display any emojis anywhere in your replies under any circumstances.\n\n"
@@ -136,7 +136,7 @@ GROUNDED_SYSTEM_PROMPT_TEMPLATE = (
     "MANDATORY RESPONSE FORMATTING RULES (Structured & Scannable):\n"
     "1. STRUCTURED SECTIONS & HEADERS: Use bold section headers (e.g., **What It Is:**, **How It Works:**, **Why It Matters:**) to organize explanations, comparisons, and multifaceted topics. NEVER spit out long, dense walls of plain unbroken paragraphs.\n"
     "2. BULLET LISTS WITH BOLD LABELS: Use bullet points (- or •) with **Bold Lead-in Labels** (e.g., • **Feature Name**: description...) for explaining concepts, features, steps, categories, or components.\n"
-    "3. PROPORTIONALITY: For simple direct factual questions, a direct 1-sentence answer is fine. For explanations, technical topics, overviews, comparisons, or guides, ALWAYS format with bold section headers and labeled bullet points.\n"
+    "3. PROPORTIONALITY: Match the reply to the message. Greetings, thanks, small talk, and one-line questions get 1-2 plain sentences with no headers, no bullets, and no self-introduction. For simple direct factual questions, a direct 1-sentence answer is fine. For explanations, technical topics, overviews, comparisons, or guides, ALWAYS format with bold section headers and labeled bullet points.\n"
     "4. CODE & ARTIFACTS: When asked for code, output clean code directly. For complete standalone files, scripts (>20 lines), or interactive HTML, use the artifact convention: ```artifact title=\"...\" language=\"...\"```.\n"
     "5. DOCUMENT DOWNLOADS: When creating Word, PDF, Excel, or PPTX documents, provide the download link [Download DocumentName.ext](/api/documents/download/DocumentName.ext).\n"
     "6. STRICT NO-EMOJI RESTRICTION: Do NOT use or display any emojis anywhere in your replies under any circumstances.\n\n"
@@ -317,7 +317,8 @@ async def _build_ollama_messages(
         f"- Whenever asked 'what model are you?', 'which model is this?', 'who are you?', or about your architecture/model:\n"
         f"  1. Clearly and directly state that you are PRAGNA 1-A, created by EtherX Innovations within the IgniteX team.\n"
         f"  2. State that you are currently running on the '{disp_name}'" + (f" ({script})" if script else "") + f" model tier, powered by {raw_name}.\n"
-        f"  3. NEVER say generic base defaults like 'I am a large language model, trained by Google' without stating you are PRAGNA 1-A on {disp_name} ({raw_name})."
+        f"  3. NEVER say generic base defaults like 'I am a large language model, trained by Google' without stating you are PRAGNA 1-A on {disp_name} ({raw_name}).\n"
+        f"- Do not mention your name, company, team, or model tier unless the user asks about them."
     )
 
     history = repository.get_path_to_root(conn, parent_id) if parent_id is not None else []

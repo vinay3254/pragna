@@ -104,10 +104,10 @@ async def retrieve(
     try:
         query_embedding = await embed(query, embed_model, ollama_url)
     except Exception:
-        return []
+        query_embedding = []
 
     if not query_embedding:
-        return []
+        return _leading_chunks(collection, top_k, where)
 
     query_kwargs: dict = {
         "query_embeddings": [query_embedding],
@@ -119,7 +119,7 @@ async def retrieve(
     results = collection.query(**query_kwargs)
 
     if not results or not results.get("documents") or not results["documents"][0]:
-        return []
+        return _leading_chunks(collection, top_k, where)
 
     retrieved = []
     documents = results["documents"][0]
@@ -137,5 +137,27 @@ async def retrieve(
                 }
             )
 
-    return retrieved
+    return retrieved or _leading_chunks(collection, top_k, where)
+
+
+def _leading_chunks(collection, top_k: int, where: dict | None) -> list[dict]:
+    """Opening chunks of the documents the user explicitly attached.
+
+    Used when similarity search finds nothing -- embeddings unavailable (the
+    chunks were stored as zero vectors) or a generic query like "take a look
+    at this file" -- so attached documents still reach the model. Without an
+    explicit document filter there is nothing to fall back to.
+    """
+    if not where:
+        return []
+    got = collection.get(where=where, limit=top_k, include=["documents", "metadatas"])
+    return [
+        {
+            "document_id": meta["document_id"],
+            "filename": meta["filename"],
+            "snippet": doc[:600],
+            "similarity": 0.0,
+        }
+        for doc, meta in zip(got.get("documents") or [], got.get("metadatas") or [])
+    ]
 

@@ -8,6 +8,7 @@ import {
   CalendarClock,
   Clock,
   LayoutGrid,
+  Palette,
   Sun,
   Moon,
   Trash2,
@@ -207,6 +208,13 @@ export default function Sidebar({
                 >
                   <Clock size={16} strokeWidth={1.8} className="flex-shrink-0" />
                   <span className="flex-1 text-left">Scheduled</span>
+                </button>
+                <button
+                  onClick={() => router.push('/design')}
+                  className="flex items-center gap-2.5 w-full pl-3 pr-2 py-1.5 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-colors duration-150 group"
+                >
+                  <Palette size={16} strokeWidth={1.8} className="flex-shrink-0" />
+                  <span className="flex-1 text-left">Design</span>
                 </button>
                 <button
                   onClick={onOpenArtifacts}

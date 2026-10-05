@@ -742,4 +742,151 @@ def get_user_subscription_status(conn, user_id: int) -> dict:
     return {"plan": row["plan"] or user_plan, "current_period_end": period_end}
 
 
+# --- Design projects -------------------------------------------------------
 
+MAX_SCREEN_VERSIONS = 50
+
+
+def create_design_project(conn, user_id: int, name: str, device: str, theme: dict) -> int:
+    now = _now()
+    cur = conn.execute(
+        "INSERT INTO design_projects (user_id, name, device, theme, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, name, device, json.dumps(theme), now, now),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def _project_row(row) -> dict:
+    project = dict(row)
+    project["theme"] = json.loads(project["theme"])
+    return project
+
+
+def get_design_project(conn, user_id: int, project_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT id, name, device, theme, created_at, updated_at FROM design_projects WHERE id = ? AND user_id = ?",
+        (project_id, user_id),
+    ).fetchone()
+    return _project_row(row) if row else None
+
+
+def list_design_projects(conn, user_id: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, name, device, theme, created_at, updated_at FROM design_projects WHERE user_id = ? ORDER BY updated_at DESC",
+        (user_id,),
+    ).fetchall()
+    return [_project_row(r) for r in rows]
+
+
+def update_design_project(conn, project_id: int, name: str | None = None, theme: dict | None = None) -> None:
+    if name is not None:
+        conn.execute("UPDATE design_projects SET name = ? WHERE id = ?", (name, project_id))
+    if theme is not None:
+        conn.execute("UPDATE design_projects SET theme = ? WHERE id = ?", (json.dumps(theme), project_id))
+    conn.execute("UPDATE design_projects SET updated_at = ? WHERE id = ?", (_now(), project_id))
+    conn.commit()
+
+
+def delete_design_project(conn, project_id: int) -> None:
+    for screen in list_design_screens(conn, project_id):
+        _delete_screen_rows(conn, screen["id"])
+    conn.execute("DELETE FROM design_projects WHERE id = ?", (project_id,))
+    conn.commit()
+
+
+def create_design_screen(conn, project_id: int, name: str, position: int) -> int:
+    cur = conn.execute(
+        "INSERT INTO design_screens (project_id, name, position, created_at) VALUES (?, ?, ?, ?)",
+        (project_id, name, position, _now()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+_SCREEN_COLUMNS = """
+    s.id, s.project_id, s.name, s.position, s.current_version_id,
+    v.body, v.prompt
+"""
+
+
+def list_design_screens(conn, project_id: int) -> list[dict]:
+    rows = conn.execute(
+        f"""
+        SELECT {_SCREEN_COLUMNS}
+        FROM design_screens s LEFT JOIN design_screen_versions v ON v.id = s.current_version_id
+        WHERE s.project_id = ? ORDER BY s.position ASC, s.id ASC
+        """,
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_design_screen(conn, user_id: int, screen_id: int) -> dict | None:
+    """The screen only if its project belongs to user_id."""
+    row = conn.execute(
+        f"""
+        SELECT {_SCREEN_COLUMNS}
+        FROM design_screens s
+        JOIN design_projects p ON p.id = s.project_id
+        LEFT JOIN design_screen_versions v ON v.id = s.current_version_id
+        WHERE s.id = ? AND p.user_id = ?
+        """,
+        (screen_id, user_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_screen_version_body(conn, version_id: int, body: str) -> None:
+    conn.execute("UPDATE design_screen_versions SET body = ? WHERE id = ?", (body, version_id))
+    conn.commit()
+
+
+def add_screen_version(conn, screen_id: int, body: str, prompt: str | None) -> int:
+    """Store a new version, make it current, and prune the oldest beyond the cap."""
+    cur = conn.execute(
+        "INSERT INTO design_screen_versions (screen_id, body, prompt, created_at) VALUES (?, ?, ?, ?)",
+        (screen_id, body, prompt, _now()),
+    )
+    version_id = cur.lastrowid
+    conn.execute("UPDATE design_screens SET current_version_id = ? WHERE id = ?", (version_id, screen_id))
+    ids = [
+        r["id"]
+        for r in conn.execute(
+            "SELECT id FROM design_screen_versions WHERE screen_id = ? ORDER BY id DESC", (screen_id,)
+        ).fetchall()
+    ]
+    for stale_id in ids[MAX_SCREEN_VERSIONS:]:
+        conn.execute("DELETE FROM design_screen_versions WHERE id = ?", (stale_id,))
+    conn.commit()
+    return version_id
+
+
+def list_screen_versions(conn, screen_id: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, prompt, created_at FROM design_screen_versions WHERE screen_id = ? ORDER BY id DESC",
+        (screen_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def restore_screen_version(conn, screen_id: int, version_id: int) -> bool:
+    row = conn.execute(
+        "SELECT id FROM design_screen_versions WHERE id = ? AND screen_id = ?", (version_id, screen_id)
+    ).fetchone()
+    if not row:
+        return False
+    conn.execute("UPDATE design_screens SET current_version_id = ? WHERE id = ?", (version_id, screen_id))
+    conn.commit()
+    return True
+
+
+def _delete_screen_rows(conn, screen_id: int) -> None:
+    conn.execute("UPDATE design_screens SET current_version_id = NULL WHERE id = ?", (screen_id,))
+    conn.execute("DELETE FROM design_screen_versions WHERE screen_id = ?", (screen_id,))
+    conn.execute("DELETE FROM design_screens WHERE id = ?", (screen_id,))
+
+
+def delete_design_screen(conn, screen_id: int) -> None:
+    _delete_screen_rows(conn, screen_id)
+    conn.commit()

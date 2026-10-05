@@ -11,6 +11,11 @@ const nextConfig = {
   // them — repositioning the visible badge alone didn't move the hit-region.
   // Disable it entirely rather than lose clicks on real UI in dev mode.
   devIndicators: false,
+  // Design generation streams for minutes (the high-reasoning model needs ~100-160s per page) and the proxy
+  // closes a stream after proxyTimeout, which cancels the model call; 30s is the default.
+  experimental: {
+    proxyTimeout: 600_000,
+  },
   typescript: {
     ignoreBuildErrors: true,
   },
@@ -107,6 +112,10 @@ const nextConfig = {
       {
         source: '/api/billing/:path*',
         destination: `${BACKEND_URL}/api/billing/:path*`,
+      },
+      {
+        source: '/api/design/:path*',
+        destination: `${BACKEND_URL}/api/design/:path*`,
       },
     ];
   },

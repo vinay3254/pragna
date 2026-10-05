@@ -61,6 +61,7 @@ async def chat_stream(
     model: str,
     ollama_url: str,
     api_keys: list[str] | None = None,
+    max_tokens: int | None = None,
 ) -> AsyncGenerator[str, None]:
     ollama_url = _normalize_url(ollama_url)
     keys_to_try = key_rotator.get_ordered_keys(api_keys)
@@ -76,6 +77,8 @@ async def chat_stream(
                 if use_openai:
                     endpoint = f"{ollama_url}/v1/chat/completions"
                     body = {"model": model, "messages": messages, "stream": True}
+                    if max_tokens:
+                        body["max_tokens"] = max_tokens
                 else:
                     endpoint = f"{ollama_url}/api/chat"
                     body = {"model": model, "messages": messages, "stream": True}

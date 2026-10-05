@@ -218,6 +218,7 @@ flowchart TD
 | **Knowledge Base (RAG)** | Automated document ingestion, recursive chunking, and similarity ranking. |
 | **Browser Exploration** | Headless DOM parsing, screenshot capture, and web page content synthesis. |
 | **Task Management** | Integrated Kanban board for organizing multi-step activities and background jobs. |
+| **Pragna Design** | Turns a brief into linked, themed app or website screens that can be refined by chat or by clicking an element, with version history and HTML/PNG export. See [Pragna Design](#pragna-design). |
 | **Rate Limiter & Guard** | In-memory token bucket rate limiting and payload validation protecting core endpoints. |
 
 ---
@@ -236,7 +237,9 @@ pragna/
 │   │   ├── browser_service.py  # Playwright browser automation
 │   │   ├── chat_service.py     # Conversation orchestration and model routing
 │   │   ├── db.py               # SQLite connection pool and schema migrations
+│   │   ├── design_service.py   # Pragna Design: planning, screen generation, repair pass, pictures
 │   │   ├── document_generator.py# PDF, Word, Excel, and Slide generators
+│   │   ├── image_service.py    # Image generation and stock-photo lookup
 │   │   ├── memory_service.py   # ChromaDB-backed semantic user memory
 │   │   ├── rag.py              # Document ingestion and vector embeddings
 │   │   ├── rate_limit.py       # Request throttling middleware
@@ -246,15 +249,46 @@ pragna/
 │   └── requirements.txt        # Python production dependencies
 ├── frontend/
 │   ├── src/
-│   │   ├── app/                # Next.js routes (chat, settings, tasks, share)
+│   │   ├── app/                # Next.js routes (chat, settings, tasks, share, design)
 │   │   ├── components/         # Reusable UI widgets and layout modules
 │   │   ├── context/            # Global React application state
-│   │   └── lib/                # Utility helpers, streaming clients, API wrappers
+│   │   └── lib/                # Utility helpers, streaming clients, API wrappers (design.ts)
+│   ├── public/vendor/          # Pinned Tailwind script used by the Design preview
 │   ├── Dockerfile              # Frontend container definition
 │   └── package.json            # Node.js dependencies and run scripts
 ├── docker-compose.yml          # Multi-container orchestration
 └── run.sh                      # Local startup script
 ```
+
+---
+
+## Pragna Design
+
+`/design` turns a one-line brief into a set of screens for a mobile app or a website.
+
+**How a generation runs**
+
+1. A planner call picks a project name, art direction, a brand theme (colours, font), generic photo search terms, and 3–5 screens. Each screen gets a surface (Monitor, Operate, Compare, Configure, Decide/Learn, Explore, Inspect) and a composition so the screens do not repeat one layout.
+2. The screens are written in parallel as Tailwind HTML bodies, using the theme tokens. The server owns everything around the body, so changing the theme re-renders every screen with no model call. Each screen appears on the canvas as soon as it is built.
+3. A second pass audits each screen against ten common AI-design flaws and repairs it in place.
+4. A third pass fills photo slots, trying in order: Codex image generation, a public-domain or CC0 photo from Wikimedia Commons, then Gemini image. Slots that stay empty are drawn in the theme colours.
+
+**Configuration** (`backend/app/design_service.py`)
+
+| Setting | Value |
+| :--- | :--- |
+| `DESIGN_MODEL` | `antigravity/gemini-3.7-flash-high` through OmniRoute |
+| `DESIGN_MAX_TOKENS` | `65536`, the model's output ceiling |
+| `IMAGE_SOURCES` | Codex terra, Codex luna, Wikimedia Commons, Gemini image |
+
+OmniRoute is reached with `OMNIROUTE_BASE_URL` and `OMNIROUTE_API_KEY` in `backend/.env`.
+
+**Things to know**
+
+- A page from the high-reasoning model takes minutes. The frontend proxy (`proxyTimeout` in `frontend/next.config.mjs`) must stay longer than a generation, or the stream is cut and the model call cancelled.
+- The in-app preview loads a pinned Tailwind copy from `frontend/public/vendor/`. Exported HTML uses the Tailwind CDN link and embeds its pictures, so it works on its own.
+- Image providers rate limit. A provider that answers 429 or 502 is skipped for 60 seconds. Codex is used for pictures only, never for text.
+- Tests: `cd backend && .venv/bin/python -m pytest tests/test_design.py -q`.
 
 ---
 

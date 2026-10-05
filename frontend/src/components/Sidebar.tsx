@@ -13,6 +13,7 @@ import {
   Plus,
   Search,
   Clock,
+  Palette,
   Trash2,
   X,
 } from 'lucide-react';
@@ -20,6 +21,7 @@ import UserProfileMenu from '@/components/UserProfileMenu';
 
 const navItems = [
   { key: 'nav-tasks', href: '/tasks', icon: Clock, label: 'Scheduled' },
+  { key: 'nav-design', href: '/design', icon: Palette, label: 'Design' },
 ];
 
 interface SidebarProps {

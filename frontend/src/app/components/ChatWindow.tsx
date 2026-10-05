@@ -31,7 +31,6 @@ interface ChatWindowProps {
   onOpenCommandPalette?: () => void;
   onOpenTools?: () => void;
   sources?: Source[];
-  onAttachSource?: (source: Source) => void;
   onRemoveSource?: (sourceId: number) => void;
   selectedLanguage?: string;
   onSelectLanguage?: (code: string) => void;
@@ -54,7 +53,6 @@ export default function ChatWindow({
   onOpenCommandPalette,
   onOpenTools,
   sources = [],
-  onAttachSource,
   onRemoveSource,
   selectedLanguage = 'en',
   onSelectLanguage = () => {},
@@ -314,21 +312,22 @@ export default function ChatWindow({
                 const imageFiles = allFiles.filter(f => f.type.startsWith('image/'));
                 const docFiles = allFiles.filter(f => !f.type.startsWith('image/'));
 
-                if (docFiles.length > 0) {
-                  for (const file of docFiles) {
-                    try {
-                      const doc = await uploadDocument(file);
-                      onAttachSource?.({ id: doc.id, filename: doc.filename, chunkCount: doc.chunk_count });
-                      toast.success(`Added "${doc.filename}" as a source.`);
-                    } catch (err) {
-                      toast.error(err instanceof Error ? err.message : `Failed to attach "${file.name}"`);
-                    }
+                // Pass uploads straight to onSendMessage: attaching via state first
+                // races the send, so the reply would go out without the sources.
+                const uploaded: Source[] = [];
+                for (const file of docFiles) {
+                  try {
+                    const doc = await uploadDocument(file);
+                    uploaded.push({ id: doc.id, filename: doc.filename, chunkCount: doc.chunk_count });
+                    toast.success(`Added "${doc.filename}" as a source.`);
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : `Failed to attach "${file.name}"`);
                   }
                 }
 
                 const images = imageFiles.length > 0 ? await filesToDataUrls(imageFiles) : undefined;
                 const finalMsg = msg.trim() || (docFiles.length > 0 ? `Take a look at ${docFiles.map(f => f.name).join(', ')}.` : msg);
-                onSendMessage(finalMsg, images, undefined, meta?.language, chosenModelId);
+                onSendMessage(finalMsg, images, uploaded.length > 0 ? uploaded : undefined, meta?.language, chosenModelId);
               }}
               placeholder="Reply to PRAGNA 1-A..."
               initialModel={selectedModel?.label || "Tvarā"}

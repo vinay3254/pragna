@@ -49,6 +49,7 @@ Voice, Tone & Personality (PRAGNA 1-A Standard):
   - Use bullet points (- or •) with **Bold Lead-in Labels** (e.g., • **Feature Name**: detailed explanation...) for scannable, punchy readability.
   - NEVER dump long, dense walls of plain unbroken paragraphs.
 - Proportionality:
+  - Match the length and format of the reply to the message. Greetings, thanks, small talk, and short questions get a short, plain reply in 1-2 sentences, with no headers, bullets, or follow-up pitch.
   - For simple, direct factual questions, provide a direct, concise answer.
   - For concepts, technologies, guides, or analyses, provide a structured, beautifully formatted breakdown.
 - Artifacts Convention:
@@ -84,6 +85,9 @@ function sseChunk(content: string): string {
     choices: [{ delta: { content: stripEmojis(content) } }],
   })}\n\n`;
 }
+
+// Appended after the base prompt so it also applies to custom prompts saved in settings.
+const REPLY_SIZE_DIRECTIVE = `[REPLY SIZE]: Match the reply to the message. For greetings ("hi", "hello"), thanks, small talk, or one-line questions, answer in 1-2 plain sentences: no section headers, no bullet lists, no self-introduction. Use headers and bullets only when the user asks for an explanation, comparison, or guide. Do not mention your name, company, team, or model tier unless the user asks about them.`;
 
 // Helper to detect if user is specifically asking about what model/AI they are interacting with
 function isModelIdentityQuery(query: string): boolean {
@@ -469,19 +473,26 @@ async function detectAndExecuteImageGeneration(messages: any[], onStart?: () => 
     || /\b(image|picture|photo|illustration|drawing|painting|logo|poster|banner|avatar)\s+(of|for)\b/i.test(lastMsg)
     || /^draw\s+/i.test(lastMsg);
 
+  // A pasted image prompt with no "make an image" verb, e.g. "A cinematic,
+  // hyper-realistic portrait of ... 8k, 85mm lens". Two or more render-style
+  // markers is a prompt, not a question about photography.
+  const STYLE_MARKERS = /\b(photo-?realistic|hyper-?realistic|cinematic|8k|4k|\d{2,3}mm( lens)?|depth of field|bokeh|studio lighting|dramatic lighting|volumetric|octane|unreal engine|concept art|digital art|ultra[- ]detailed|highly detailed|trending on artstation)\b/gi;
+  const isPastedPrompt = new Set((lastMsg.match(STYLE_MARKERS) || []).map((m: string) => m.toLowerCase())).size >= 2
+    && !/\?\s*$/.test(lastMsg);
+
   // Exclude requests to write code or generic file queries
   const isCodingRequest = /\b(write|create|implement)\s+(?:a\s+)?(?:python|javascript|typescript|c\+\+|html|css|component|function|api|endpoint|sql|script)\b/i.test(lastMsg);
   if (isCodingRequest && !/\b(image|photo|picture)\b/i.test(lastMsg)) return null;
 
-  if (!isImageRequest) return null;
+  if (!isImageRequest && !isPastedPrompt) return null;
 
-  // Extract clean prompt
-  let prompt = lastMsg
+  // Extract clean prompt (a pasted prompt is already clean)
+  let prompt = !isPastedPrompt ? lastMsg
     .replace(/\b(can you|could you|please|kindly|i want you to|help me|generate me|generate|create me|create|draw me|draw|make me|make|render me|render|paint me|paint|produce|give me|show me)\b/gi, ' ')
     .replace(/\b(an?|the|some)?\s*(image|picture|photo|illustration|drawing|painting|artwork|graphic|portrait|wallpaper|sketch)\s*(of|for|about|with|depicting|showing)?\b/gi, ' ')
     .replace(/[?!,.:;"]/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim() : lastMsg;
 
   if (!prompt || prompt.length < 2) {
     prompt = lastMsg;
@@ -666,6 +677,7 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
     const systemPromptParts = [
       basePrompt,
       modelIdentityDirective,
+      REPLY_SIZE_DIRECTIVE,
       `[CURRENT DATE & TIME]: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'short' })} (IST). Use this for any question about today's date, day, or time. Never guess it.`,
       promptBlock ? `[USER CONTEXT & PERSISTENT MEMORIES]:\n${promptBlock}` : '',
       languageDirective,
