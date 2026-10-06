@@ -50,11 +50,11 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
       {/* Header */}
       <div className={`flex items-center px-3 py-3 shrink-0 ${collapsed ? 'justify-center' : 'justify-between'}`}>
         {collapsed ? (
-          <AppLogo size={30} variant="shield" />
+          <AppLogo size={26} variant="shield" />
         ) : (
           <Link
             href="/"
-            className="flex items-center select-none py-0.5"
+            className="flex min-h-8 items-center rounded-md select-none py-0.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
             title="PRAGNA 1-A - Start new chat"
             onClick={() => {
               startNewChat();

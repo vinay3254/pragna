@@ -33,9 +33,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           >
             <Menu size={18} />
           </button>
-          <div className="ml-2 flex items-center gap-1.5">
-            <AppLogo size={20} variant="shield" />
-            <span className="font-bold text-sm text-foreground">PRAGNA 1-A</span>
+          <div className="ml-2 flex items-center">
+            <AppLogo size={22} variant="full" />
           </div>
         </div>
         <main className="flex-1 min-w-0 overflow-hidden flex flex-col">{children}</main>

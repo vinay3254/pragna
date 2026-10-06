@@ -192,7 +192,7 @@ export default function ChatWindow({
           ) : (
             !sidebarOpen && (
               <div className="flex items-center">
-                <AppLogo size={24} variant="full" />
+                <AppLogo size={22} variant="full" />
               </div>
             )
           )}

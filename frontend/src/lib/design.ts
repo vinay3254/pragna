@@ -23,6 +23,8 @@ export interface DesignProject {
   updated_at: string;
   /** Present on list responses: the first built screen as a static document, for thumbnails. */
   preview_html?: string | null;
+  screen_count?: number;
+  has_preview?: boolean;
 }
 
 export interface DesignScreen {
@@ -38,6 +40,14 @@ export interface DesignScreen {
 export interface DesignProjectDetail {
   project: DesignProject;
   screens: DesignScreen[];
+  messages?: DesignMessage[];
+}
+
+export interface DesignMessage {
+  id: number | string;
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string;
 }
 
 export interface DesignVersion {
@@ -47,7 +57,12 @@ export interface DesignVersion {
 }
 
 export type GenerateEvent =
-  | { type: 'plan'; project_name: string; theme: DesignTheme; screens: { id: number; name: string; purpose: string }[] }
+  | {
+      type: 'plan';
+      project_name: string;
+      theme: DesignTheme;
+      screens: { id: number; name: string; purpose: string }[];
+    }
   | { type: 'screen'; id: number; version_id: number; body: string; html: string }
   | { type: 'screen_error'; id: number; error: string }
   | { type: 'error'; error: string }
@@ -59,7 +74,16 @@ export const DEVICE_FRAME: Record<DesignDevice, { width: number; height: number 
   web: { width: 1280, height: 800 },
 };
 
-export const THEME_FONTS = ['Inter', 'Poppins', 'DM Sans', 'Roboto', 'Manrope', 'Space Grotesk', 'Playfair Display', 'Lora'];
+export const THEME_FONTS = [
+  'Inter',
+  'Poppins',
+  'DM Sans',
+  'Roboto',
+  'Manrope',
+  'Space Grotesk',
+  'Playfair Display',
+  'Lora',
+];
 export const THEME_RADII = ['0px', '4px', '8px', '12px', '16px', '24px'];
 export const THEME_COLORS: { key: keyof DesignTheme; label: string }[] = [
   { key: 'primary', label: 'Primary' },
@@ -100,7 +124,8 @@ const send = (method: string, body?: unknown): RequestInit => ({
 });
 
 export const designApi = {
-  listProjects: () => request<DesignProject[]>('/projects'),
+  listProjects: () => request<DesignProject[]>('/projects?include_previews=false'),
+  getPreview: (id: number) => request<{ html: string | null }>(`/projects/${id}/preview`),
   createProject: (device: DesignDevice) =>
     request<DesignProjectDetail>('/projects', send('POST', { device })),
   getProject: (id: number) => request<DesignProjectDetail>(`/projects/${id}`),
@@ -108,13 +133,21 @@ export const designApi = {
     request<DesignProjectDetail>(`/projects/${id}`, send('PATCH', patch)),
   deleteProject: (id: number) => request<{ ok: boolean }>(`/projects/${id}`, send('DELETE')),
   editScreen: (id: number, instruction: string, elementHtml?: string) =>
-    request<DesignScreen>(`/screens/${id}/edit`, send('POST', { instruction, element_html: elementHtml })),
+    request<DesignScreen>(
+      `/screens/${id}/edit`,
+      send('POST', { instruction, element_html: elementHtml })
+    ),
   regenerateScreen: (id: number, prompt?: string) =>
     request<DesignScreen>(`/screens/${id}/regenerate`, send('POST', { prompt })),
   deleteScreen: (id: number) => request<{ ok: boolean }>(`/screens/${id}`, send('DELETE')),
   listVersions: (id: number) => request<DesignVersion[]>(`/screens/${id}/versions`),
   restoreVersion: (id: number, versionId: number) =>
     request<DesignScreen>(`/screens/${id}/restore`, send('POST', { version_id: versionId })),
+  updateText: (id: number, selector: string, text: string, versionId: number) =>
+    request<DesignScreen>(
+      `/screens/${id}/text`,
+      send('POST', { selector, text, version_id: versionId })
+    ),
 };
 
 /** Streams generation events (SSE over fetch, so the auth header can be sent). */
@@ -122,7 +155,7 @@ export async function streamGenerate(
   projectId: number,
   body: { prompt: string; image?: string; add?: boolean },
   onEvent: (event: GenerateEvent) => void,
-  signal?: AbortSignal,
+  signal?: AbortSignal
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/api/design/projects/${projectId}/generate`, {
     method: 'POST',
@@ -136,29 +169,60 @@ export async function streamGenerate(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const frames = buffer.split('\n\n');
-    buffer = frames.pop() ?? '';
-    for (const frame of frames) {
-      const line = frame.split('\n').find((l) => l.startsWith('data: '));
-      if (!line) continue;
-      try {
-        onEvent(JSON.parse(line.slice(6)));
-      } catch {
-        // A malformed frame is skipped rather than aborting the whole flow.
+  let terminal = false;
+  const dispatch = (frame: string) => {
+    const payload = frame
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n');
+    if (!payload) return;
+    let event: GenerateEvent;
+    try {
+      event = JSON.parse(payload);
+    } catch {
+      return;
+    }
+    if (event.type === 'done' || event.type === 'error') terminal = true;
+    onEvent(event);
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n/g, '\n');
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      frames.forEach(dispatch);
+      if (done) {
+        if (buffer.trim()) dispatch(buffer);
+        break;
       }
     }
+    if (!terminal)
+      throw new Error(
+        'Generation disconnected before finishing. Completed screens are saved; retry remaining screens.'
+      );
+  } finally {
+    reader.releaseLock();
   }
 }
 
 /** Downloads one screen as standalone HTML. */
 export async function downloadScreenHtml(screenId: number, name: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/design/screens/${screenId}/export`, { headers: headers(false) });
+  const res = await fetch(`${API_BASE}/api/design/screens/${screenId}/export`, {
+    headers: headers(false),
+  });
   if (!res.ok) throw await failure(res);
   saveBlob(await res.blob(), `${slug(name)}.html`);
+}
+
+export async function downloadProjectZip(projectId: number, name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/design/projects/${projectId}/export`, {
+    headers: headers(false),
+  });
+  if (!res.ok) throw await failure(res);
+  saveBlob(await res.blob(), `${slug(name)}.zip`);
 }
 
 export function downloadDataUrl(dataUrl: string, filename: string): void {
@@ -174,7 +238,8 @@ function saveBlob(blob: Blob, filename: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export const slug = (name: string): string => name.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'screen';
+export const slug = (name: string): string =>
+  name.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'screen';
 
 /** Reads an image file as a data URL, enforcing the server's 10MB cap. */
 export function readImageFile(file: File): Promise<string> {
@@ -192,7 +257,11 @@ export function readImageFile(file: File): Promise<string> {
 // sessionStorage) because an attached image can exceed the storage quota.
 let pendingStart: { projectId: number; prompt: string; image?: string } | null = null;
 
-export function setPendingStart(start: { projectId: number; prompt: string; image?: string }): void {
+export function setPendingStart(start: {
+  projectId: number;
+  prompt: string;
+  image?: string;
+}): void {
   pendingStart = start;
 }
 

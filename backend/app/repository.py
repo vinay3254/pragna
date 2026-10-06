@@ -791,6 +791,7 @@ def update_design_project(conn, project_id: int, name: str | None = None, theme:
 def delete_design_project(conn, project_id: int) -> None:
     for screen in list_design_screens(conn, project_id):
         _delete_screen_rows(conn, screen["id"])
+    conn.execute("DELETE FROM design_messages WHERE project_id = ?", (project_id,))
     conn.execute("DELETE FROM design_projects WHERE id = ?", (project_id,))
     conn.commit()
 
@@ -890,3 +891,20 @@ def _delete_screen_rows(conn, screen_id: int) -> None:
 def delete_design_screen(conn, screen_id: int) -> None:
     _delete_screen_rows(conn, screen_id)
     conn.commit()
+
+
+def add_design_message(conn, project_id: int, role: str, content: str) -> int:
+    cur = conn.execute(
+        "INSERT INTO design_messages (project_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        (project_id, role, content, _now()),
+    )
+    conn.execute("UPDATE design_projects SET updated_at = ? WHERE id = ?", (_now(), project_id))
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_design_messages(conn, project_id: int) -> list[dict]:
+    return [dict(row) for row in conn.execute(
+        "SELECT id, role, content, created_at FROM design_messages WHERE project_id = ? ORDER BY id",
+        (project_id,),
+    ).fetchall()]

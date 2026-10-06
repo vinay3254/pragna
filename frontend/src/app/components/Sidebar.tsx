@@ -161,13 +161,14 @@ export default function Sidebar({
         <div className="flex flex-col h-full w-[260px]">
           {/* Header */}
           <div className="flex items-center justify-between px-3 py-3 flex-shrink-0">
-            <div
-              className="flex items-center cursor-pointer select-none py-0.5"
+            <button
+              type="button"
+              className="flex min-h-8 items-center rounded-md select-none py-0.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
               onClick={onNewConversation}
               title="PRAGNA 1-A - Start new chat"
             >
               <AppLogo size={30} variant="full" />
-            </div>
+            </button>
             <button
               onClick={onToggle}
               className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-colors duration-150"

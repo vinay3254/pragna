@@ -1,4 +1,10 @@
 import json
+import io
+import zipfile
+import re
+from urllib.parse import urlsplit, unquote
+
+from bs4 import BeautifulSoup
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -44,6 +50,12 @@ class RestoreRequest(BaseModel):
     version_id: int
 
 
+class TextUpdate(BaseModel):
+    selector: str = Field(..., min_length=1, max_length=2000)
+    text: str = Field(..., max_length=4000)
+    version_id: int
+
+
 def _screen_payload(project: dict, screen: dict) -> dict:
     body = screen.get("body")
     return {
@@ -58,7 +70,8 @@ def _screen_payload(project: dict, screen: dict) -> dict:
 
 def _project_payload(conn, project: dict) -> dict:
     screens = repository.list_design_screens(conn, project["id"])
-    return {"project": project, "screens": [_screen_payload(project, s) for s in screens]}
+    return {"project": project, "screens": [_screen_payload(project, s) for s in screens],
+            "messages": repository.list_design_messages(conn, project["id"])}
 
 
 def _own_project(request: Request, user: dict, project_id: int) -> dict:
@@ -84,15 +97,37 @@ def _valid_image(image: str | None) -> str | None:
 
 
 @router.get("/api/design/projects")
-async def list_projects(request: Request, user: dict = Depends(get_current_user)):
+async def list_projects(request: Request, include_previews: bool = True, user: dict = Depends(get_current_user)):
     conn = request.app.state.conn
     projects = repository.list_design_projects(conn, user["id"])
     for project in projects:
-        first = next((s for s in repository.list_design_screens(conn, project["id"]) if s.get("body")), None)
+        if not include_previews:
+            summary = conn.execute(
+                "SELECT COUNT(*) AS screen_count, COUNT(current_version_id) AS built_count FROM design_screens WHERE project_id = ?",
+                (project["id"],),
+            ).fetchone()
+            project["screen_count"] = summary["screen_count"]
+            project["has_preview"] = summary["built_count"] > 0
+            continue
+        screens = repository.list_design_screens(conn, project["id"])
+        project["screen_count"] = len(screens)
+        first = next((s for s in screens if s.get("body")), None)
         project["preview_html"] = (
             design_service.render_document(first["body"], project["theme"], first["id"], interactive=False) if first else None
         )
     return projects
+
+
+@router.get("/api/design/projects/{project_id}/preview")
+async def project_preview(request: Request, project_id: int, user: dict = Depends(get_current_user)):
+    project = _own_project(request, user, project_id)
+    conn = request.app.state.conn
+    row = conn.execute(
+        "SELECT id FROM design_screens WHERE project_id = ? AND current_version_id IS NOT NULL ORDER BY position, id LIMIT 1",
+        (project_id,),
+    ).fetchone()
+    first = repository.get_design_screen(conn, user["id"], row["id"]) if row else None
+    return {"html": design_service.render_document(first["body"], project["theme"], first["id"], interactive=False) if first and first.get("body") else None}
 
 
 @router.post("/api/design/projects")
@@ -139,17 +174,37 @@ async def generate(request: Request, project_id: int, body: GenerateRequest, use
     conn, settings = request.app.state.conn, request.app.state.settings
 
     async def stream():
+        repository.add_design_message(conn, project_id, "user", body.prompt.strip() or "Design from this reference image")
         events = design_service.generate_flow(conn, settings, project, body.prompt.strip(), image, body.add)
+        built, failed = set(), set()
+        terminal = False
         try:
             async for event in events:
                 if event["type"] == "screen":
+                    built.add(event["id"])
                     # The page renders html, so send the finished document, not just the body.
                     event = {**event, "html": design_service.render_document(
                         event["body"], project["theme"], event["id"], interactive=True)}
+                elif event["type"] == "screen_error":
+                    failed.add(event["id"])
+                elif event["type"] == "error":
+                    terminal = True
+                    repository.add_design_message(conn, project_id, "assistant", event["error"])
+                elif event["type"] == "done":
+                    terminal = True
+                    message = f"Created {len(built)} screen{'s' if len(built) != 1 else ''}. Explore your design in Preview, or describe what to change."
+                    if failed:
+                        message += f" {len(failed)} screen(s) need a retry."
+                    repository.add_design_message(conn, project_id, "assistant", message)
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
+            terminal = True
+            repository.add_design_message(conn, project_id, "assistant", f"Generation failed: {exc}")
             yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
         finally:
+            if not terminal:
+                repository.add_design_message(conn, project_id, "assistant",
+                    "Generation stopped. Completed screens are saved; retry any remaining screens.")
             await events.aclose()
 
     # no-transform keeps proxies (Next's rewrite included) from gzip-buffering the stream.
@@ -165,14 +220,22 @@ async def edit_screen(request: Request, screen_id: int, body: EditRequest, user:
     project, screen = _own_screen(request, user, screen_id)
     if not screen.get("body"):
         raise HTTPException(status_code=400, detail="This screen has no design to edit yet")
+    conn = request.app.state.conn
+    context = "\n".join(f"{m['role']}: {m['content']}" for m in repository.list_design_messages(conn, project["id"])[-8:])[-8000:]
+    repository.add_design_message(conn, project["id"], "user", f"{screen['name']}: {body.instruction}")
     try:
         updated = await design_service.edit_screen_body(
-            request.app.state.settings, screen["body"], body.instruction, body.element_html
+            request.app.state.settings, screen["body"], body.instruction, body.element_html, context=context
         )
     except DesignError as exc:
+        repository.add_design_message(conn, project["id"], "assistant", f"Could not update {screen['name']}: {exc}")
         raise HTTPException(status_code=502, detail=str(exc))
-    conn = request.app.state.conn
+    current = repository.get_design_screen(conn, user["id"], screen_id)
+    if not current or current["current_version_id"] != screen["current_version_id"]:
+        repository.add_design_message(conn, project["id"], "assistant", "This screen changed during generation. The newer design is preserved; retry your edit.")
+        raise HTTPException(status_code=409, detail="This screen changed during generation. Refresh and retry your edit.")
     repository.add_screen_version(conn, screen_id, updated, body.instruction)
+    repository.add_design_message(conn, project["id"], "assistant", f"Updated {screen['name']}. The previous version is available in History.")
     return _screen_payload(project, repository.get_design_screen(conn, user["id"], screen_id))
 
 
@@ -191,6 +254,7 @@ async def regenerate_screen(request: Request, screen_id: int, body: RegenerateRe
         raise HTTPException(status_code=502, detail=str(exc))
     conn = request.app.state.conn
     repository.add_screen_version(conn, screen_id, built, purpose)
+    repository.add_design_message(conn, project["id"], "assistant", f"Built {screen['name']}. It is ready to refine.")
     return _screen_payload(project, repository.get_design_screen(conn, user["id"], screen_id))
 
 
@@ -202,11 +266,70 @@ async def screen_versions(request: Request, screen_id: int, user: dict = Depends
 
 @router.post("/api/design/screens/{screen_id}/restore")
 async def restore_version(request: Request, screen_id: int, body: RestoreRequest, user: dict = Depends(get_current_user)):
-    project, _ = _own_screen(request, user, screen_id)
+    project, screen = _own_screen(request, user, screen_id)
     conn = request.app.state.conn
     if not repository.restore_screen_version(conn, screen_id, body.version_id):
         raise HTTPException(status_code=404, detail="Version not found")
+    repository.add_design_message(conn, project["id"], "assistant", f"Restored an earlier version of {screen['name']}.")
     return _screen_payload(project, repository.get_design_screen(conn, user["id"], screen_id))
+
+
+@router.post("/api/design/screens/{screen_id}/text")
+async def update_text(request: Request, screen_id: int, body: TextUpdate, user: dict = Depends(get_current_user)):
+    """Change a leaf element's text without a model call; never accept HTML from the editor."""
+    project, screen = _own_screen(request, user, screen_id)
+    if body.version_id != screen["current_version_id"]:
+        raise HTTPException(status_code=409, detail="This screen changed. Select the text again and retry.")
+    if not screen.get("body"):
+        raise HTTPException(status_code=400, detail="This screen has no design to edit yet")
+    soup = BeautifulSoup(f"<body>{screen['body']}</body>", "html.parser")
+    try:
+        element = soup.select_one(body.selector)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid text selection")
+    if (not element or element.name in {"body", "script", "style", "input", "textarea", "img", "svg", "path", "iframe"}
+            or element.find(True)):
+        raise HTTPException(status_code=400, detail="Select a single text element to edit")
+    element.string = body.text
+    updated = soup.body.decode_contents()
+    if len(updated.encode("utf-8")) > design_service.MAX_BODY_BYTES:
+        raise HTTPException(status_code=400, detail="This screen is too large")
+    conn = request.app.state.conn
+    repository.add_screen_version(conn, screen_id, updated, "Edited text directly")
+    repository.update_design_project(conn, project["id"])
+    return _screen_payload(project, repository.get_design_screen(conn, user["id"], screen_id))
+
+
+@router.get("/api/design/projects/{project_id}/export")
+async def export_project(request: Request, project_id: int, user: dict = Depends(get_current_user)):
+    project = _own_project(request, user, project_id)
+    screens = [s for s in repository.list_design_screens(request.app.state.conn, project_id) if s.get("body")]
+    if not screens:
+        raise HTTPException(status_code=400, detail="Build a screen before exporting")
+    buffer = io.BytesIO()
+    filenames = {}
+    for index, screen in enumerate(screens, 1):
+        name = "".join(c if c.isascii() and (c.isalnum() or c in "-_") else "-" for c in screen["name"]).strip("-") or "screen"
+        filenames[screen["id"]] = f"{index:02d}-{name}.html"
+    normalize = lambda value: re.sub(r"[^a-z0-9]", "", value.lower())
+    destinations = {normalize(s["name"]): filenames[s["id"]] for s in screens}
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for screen in screens:
+            soup = BeautifulSoup(screen["body"], "html.parser")
+            for link in soup.find_all("a", href=True):
+                href = str(link["href"])
+                if urlsplit(href).scheme or href.startswith(("//", "#")):
+                    continue
+                path = unquote(urlsplit(href).path).rstrip("/").rsplit("/", 1)[-1]
+                target = destinations.get(normalize(re.sub(r"\.html?$", "", path)))
+                if target:
+                    link["href"] = target
+            html = design_service.inline_images(design_service.render_document(
+                str(soup), project["theme"], screen["id"], interactive=False, standalone=True))
+            bundle.writestr(filenames[screen["id"]], html)
+        bundle.writestr("theme.json", json.dumps(project["theme"], indent=2))
+    return Response(buffer.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="pragna-design.zip"'})
 
 
 @router.delete("/api/design/screens/{screen_id}")

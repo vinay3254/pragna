@@ -125,9 +125,11 @@ def test_projects_are_scoped_to_their_owner(client, other_headers):
     assert client.get("/api/design/projects", headers={"Authorization": ""}).status_code == 401
 
 
-def test_generate_streams_screens_and_persists(client, monkeypatch):
-    monkeypatch.setattr(design_service, "_llm", fake_llm(plan_screens=("Home", "Cart", "Checkout"), broken=("Cart",)))
-    project_id = client.post("/api/design/projects", json={"device": "web"}).json()["project"]["id"]
+@pytest.mark.parametrize("device", ["web", "mobile"])
+def test_generate_builds_one_design_even_when_planner_returns_four(client, monkeypatch, device):
+    llm = fake_llm(plan_screens=("Home", "Cart", "Checkout", "Account"))
+    monkeypatch.setattr(design_service, "_llm", llm)
+    project_id = client.post("/api/design/projects", json={"device": device}).json()["project"]["id"]
 
     events = sse_events(client.post(f"/api/design/projects/{project_id}/generate", json={"prompt": "food delivery"}))
 
@@ -135,13 +137,45 @@ def test_generate_streams_screens_and_persists(client, monkeypatch):
     assert events[-1]["type"] == "done"
     built = [e for e in events if e["type"] == "screen"]
     failed = [e for e in events if e["type"] == "screen_error"]
-    assert len(built) == 2 and len(failed) == 1  # one bad screen does not sink the flow
+    assert len(events[0]["screens"]) == 1
+    assert len(built) == 1 and len(failed) == 0
     assert all("tailwind" in e["html"] for e in built)
 
     saved = client.get(f"/api/design/projects/{project_id}").json()
     assert saved["project"]["name"] == "Food app"
-    assert [s["name"] for s in saved["screens"]] == ["Home", "Cart", "Checkout"]
-    assert [bool(s["body"]) for s in saved["screens"]] == [True, False, True]
+    assert [s["name"] for s in saved["screens"]] == ["Home"]
+    assert saved["screens"][0]["body"]
+
+
+def test_explicit_add_builds_one_extra_screen_and_preserves_existing(client, monkeypatch):
+    monkeypatch.setattr(design_service, "_llm", fake_llm(plan_screens=("Home",)))
+    project_id = client.post("/api/design/projects", json={}).json()["project"]["id"]
+    client.post(f"/api/design/projects/{project_id}/generate", json={"prompt": "food app"})
+    original = client.get(f"/api/design/projects/{project_id}").json()["screens"][0]
+
+    monkeypatch.setattr(design_service, "_llm", fake_llm(plan_screens=("Orders", "Account", "Cart")))
+    events = sse_events(client.post(f"/api/design/projects/{project_id}/generate", json={
+        "prompt": "add an orders screen", "add": True,
+    }))
+    assert len(events[0]["screens"]) == 1
+    saved = client.get(f"/api/design/projects/{project_id}").json()["screens"]
+    assert [s["name"] for s in saved] == ["Home", "Orders"]
+    assert saved[0] == original
+
+
+def test_single_design_failure_keeps_screen_for_retry(client, monkeypatch):
+    monkeypatch.setattr(design_service, "_llm", fake_llm(plan_screens=("Home", "Cart"), broken=("Home",)))
+    project_id = client.post("/api/design/projects", json={}).json()["project"]["id"]
+    events = sse_events(client.post(f"/api/design/projects/{project_id}/generate", json={"prompt": "food app"}))
+    failed = [e for e in events if e["type"] == "screen_error"]
+    assert len(failed) == 1 and events[-1]["type"] == "done"
+    saved = client.get(f"/api/design/projects/{project_id}").json()["screens"]
+    assert len(saved) == 1 and not saved[0]["body"]
+
+    monkeypatch.setattr(design_service, "_llm", fake_llm())
+    response = client.post(f"/api/design/screens/{saved[0]['id']}/regenerate", json={})
+    assert response.status_code == 200 and response.json()["body"]
+    assert len(client.get(f"/api/design/projects/{project_id}").json()["screens"]) == 1
 
 
 def test_generate_applies_planned_theme_and_ignores_invalid(client, monkeypatch):
@@ -496,3 +530,11 @@ async def test_unsplash_photos_are_kept_only_when_they_exist(monkeypatch):
     assert '<img src="/generated_images/img_9_u.jpg">' in out            # a real photo is saved locally
     assert "https://placehold.co/800x528?text=Photo" in out               # a made-up id becomes a placeholder to fill
     assert "https://evil.example/photo-1.jpg" in out and "unsplash" not in out
+
+
+def test_designs_never_keep_emoji():
+    cleaned = design_service.strip_emoji("Order \U0001F354 now \u23F0 \u2615")
+    assert cleaned == "Order  now  "
+    # things that look like symbols but are not emoji stay
+    assert design_service.strip_emoji("\u2713 done \u2605 4.8 \u2630 menu \u0c15\u200d\u0c37") == "\u2713 done \u2605 4.8 \u2630 menu \u0c15\u200d\u0c37"
+    assert design_service.parse_html_block("```html\n<p>Tea \u2615</p>\n```") == "<p>Tea </p>"

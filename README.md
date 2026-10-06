@@ -264,12 +264,23 @@ pragna/
 
 ## Pragna Design
 
-`/design` turns a one-line brief into a set of screens for a mobile app or a website.
+`/design` turns a one-line brief into one complete interactive design for a mobile app or a website. Requested views live inside that design as local tabs, panels, or sections.
+
+The workspace pairs a persistent design conversation with a zoomable canvas. Start with a brief, paste or drop a reference image, or use a starter idea. The project gallery fetches previews only when their cards are visible.
+
+- **Canvas**: select an element for a targeted change, use the hand tool to pan, or fit and focus screens. Shortcuts: `V` to select, `H` to pan, `0` to fit, and `+` / `-` to zoom.
+- **Conversation**: follow-up messages refine the current design by default. Add a screen explicitly when needed; projects with several screens can also apply an edit to the entire design. Generation shows elapsed time and can be stopped without losing finished work. Follow-up edits include recent conversation context.
+- **Inspect**: edit a single text element instantly, without a model call. Each change creates a restorable version; stale selections cannot overwrite a newer design.
+- **Preview**: explore a screen at desktop, tablet, or mobile widths. Inputs and local prototype interactions work here; named links open matching project screens. New designs can include local tabs, filters, menus, and dialogs.
+- **Theme and history**: apply a palette, typography, and corner radius across screens, or restore an earlier screen version. Theme writes are serialized to preserve the latest choice.
+- **Export**: download one screen as HTML or PNG, or all completed screens as a ZIP containing linked HTML files and design tokens. Exported HTML uses Tailwind and Google Fonts CDNs.
+
+The editor shares Pragna’s gold palette and light/dark appearance preference. On phones, existing projects open in a focused mobile preview, with the conversation available from the header.
 
 **How a generation runs**
 
-1. A planner call picks a project name, art direction, a brand theme (colours, font), generic photo search terms, and 3–5 screens. Each screen gets a surface (Monitor, Operate, Compare, Configure, Decide/Learn, Explore, Inspect) and a composition so the screens do not repeat one layout.
-2. The screens are written in parallel as Tailwind HTML bodies, using the theme tokens. The server owns everything around the body, so changing the theme re-renders every screen with no model call. Each screen appears on the canvas as soon as it is built.
+1. A planner call picks a project name, art direction, a brand theme (colours, font), generic photo search terms, and exactly one complete design. It chooses a surface (Monitor, Operate, Compare, Configure, Decide/Learn, Explore, Inspect) and a composition for the brief.
+2. The design is written as one Tailwind HTML body with local prototype interactions, using the theme tokens. The server owns everything around the body, so changing the theme re-renders it with no model call. The completed design opens directly in Preview. Additional screens can be added explicitly; existing projects retain their screens.
 3. A second pass audits each screen against ten common AI-design flaws and repairs it in place.
 4. A third pass fills photo slots, trying in order: Codex image generation, a public-domain or CC0 photo from Wikimedia Commons, then Gemini image. Slots that stay empty are drawn in the theme colours.
 

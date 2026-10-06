@@ -1,4 +1,4 @@
-"""Pragna Design: prompt -> multi-screen Tailwind designs.
+"""Pragna Design: prompt -> one complete interactive Tailwind design.
 
 The model writes only a screen's <body>. The server owns everything around it
 (Tailwind config, theme tokens, fonts, the editor's selection script), so a
@@ -35,7 +35,7 @@ IMAGE_MAX_WIDTH = 1280
 MAX_PARALLEL_IMAGES = 1  # Codex and Gemini both answer 429 when sent bursts
 _image_gate = asyncio.Semaphore(MAX_PARALLEL_IMAGES)
 _provider_blocked_until: dict[str, float] = {}  # "codex" -> monotonic time its 429 cooldown ends
-MAX_SCREENS_PER_GENERATE = 5
+MAX_SCREENS_PER_GENERATE = 1
 MAX_SCREENS_PER_PROJECT = 20
 MAX_PARALLEL_SCREENS = 3
 MAX_BODY_BYTES = 400_000  # a screen written with the full 64k-token budget can pass 200KB
@@ -84,33 +84,79 @@ def validate_theme(theme: dict | None) -> dict:
 # --- Rendering -------------------------------------------------------------
 
 _SELECT_SCRIPT = """
-<script src="https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js"></script>
 <script>
 (function () {
-  var SID = %(screen_id)d, hover = null, picked = null, ACCENT = '%(accent)s';
-  function mark(el, on) { if (el) el.style.outline = on ? '2px solid ' + ACCENT : ''; if (el) el.style.outlineOffset = on ? '-2px' : ''; }
+  var SID = %(screen_id)d, hover = null, picked = null, mode = 'select', ACCENT = '%(accent)s';
+  var originals = new WeakMap();
+  function send(type, data) { parent.postMessage(Object.assign({ source: 'pragna-design', type: type, screenId: SID }, data || {}), '*'); }
+  function mark(el, on) {
+    if (!el || !el.style) return;
+    if (on) {
+      if (!originals.has(el)) originals.set(el, [el.style.outline, el.style.outlineOffset]);
+      el.style.outline = '2px solid ' + ACCENT; el.style.outlineOffset = '-2px';
+    } else if (originals.has(el)) {
+      var old = originals.get(el); el.style.outline = old[0]; el.style.outlineOffset = old[1]; originals.delete(el);
+    }
+  }
+  function clear() { mark(hover, false); mark(picked, false); hover = null; picked = null; }
+  function path(el) {
+    var parts = [];
+    while (el && el !== document.body) {
+      var index = Array.prototype.indexOf.call(el.parentElement.children, el) + 1;
+      parts.unshift(el.tagName.toLowerCase() + ':nth-child(' + index + ')'); el = el.parentElement;
+    }
+    return 'body > ' + parts.join(' > ');
+  }
   document.addEventListener('mouseover', function (e) {
+    if (mode !== 'select') return;
     if (hover && hover !== picked) mark(hover, false);
     hover = e.target; if (hover !== picked) mark(hover, true);
   });
+  document.addEventListener('mouseleave', function () { if (hover !== picked) mark(hover, false); hover = null; });
   document.addEventListener('click', function (e) {
-    e.preventDefault(); e.stopPropagation();
-    mark(picked, false); picked = e.target; mark(picked, true);
-    parent.postMessage({ source: 'pragna-design', type: 'select', screenId: SID,
-      tag: picked.tagName.toLowerCase(), html: picked.outerHTML.slice(0, 6000) }, '*');
+    if (mode === 'preview') {
+      var link = e.target.closest('a');
+      if (link) {
+        e.preventDefault();
+        var href = link.getAttribute('href') || '';
+        if (href.charAt(0) === '#') {
+          var target = document.getElementById(href.slice(1));
+          if (target) { target.scrollIntoView({ behavior: 'smooth' }); return; }
+        }
+        send('navigate', { href: href, label: link.textContent.trim() });
+      }
+      return;
+    }
+    if (e.target === document.body || e.target === document.documentElement) return;
+    e.preventDefault(); e.stopPropagation(); clear(); picked = e.target;
+    var canEdit = picked.children.length === 0 && ['SCRIPT','STYLE','INPUT','TEXTAREA','IMG','SVG','PATH','IFRAME'].indexOf(picked.tagName) < 0;
+    send('select', { tag: picked.tagName.toLowerCase(), html: picked.outerHTML.slice(0, 6000),
+      selector: path(picked), text: picked.textContent.trim().slice(0,4000), canEdit: canEdit });
+    mark(picked, true);
   }, true);
+  document.addEventListener('submit', function (e) { e.preventDefault(); });
   window.addEventListener('message', function (e) {
+    if (e.source !== parent) return;
     var m = e.data || {};
-    if (m.type === 'clear') { mark(picked, false); picked = null; }
-    if (m.type === 'capture' && window.htmlToImage) {
-      mark(picked, false);
-      htmlToImage.toPng(document.body, { pixelRatio: 2 }).then(function (url) {
-        parent.postMessage({ source: 'pragna-design', type: 'png', screenId: SID, url: url }, '*');
-      }).catch(function (err) {
-        parent.postMessage({ source: 'pragna-design', type: 'png-error', screenId: SID, error: String(err) }, '*');
-      });
+    if (m.type === 'clear') clear();
+    if (m.type === 'mode') { clear(); mode = m.mode === 'preview' ? 'preview' : 'select'; }
+    if (m.type === 'capture') {
+      clear();
+      function capture() {
+        window.htmlToImage.toPng(document.body, { pixelRatio: 2 }).then(function (url) {
+          send('png', { url: url });
+        }).catch(function (err) { send('png-error', { error: String(err) }); });
+      }
+      if (window.htmlToImage) capture();
+      else {
+        var script = document.createElement('script');
+        script.src = 'https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js';
+        script.onload = capture; script.onerror = function () { send('png-error', { error: 'Could not load the image exporter' }); };
+        document.head.appendChild(script);
+      }
     }
   });
+  send('ready');
 })();
 </script>
 """
@@ -171,7 +217,8 @@ def render_document(body: str, theme: dict, screen_id: int, interactive: bool, s
         f'<style>html{{background:{t["background"]}}}</style>'
         f'<script src="{_TAILWIND_CDN if standalone else _TAILWIND_LOCAL}"></script>'
         f'<link href="https://fonts.googleapis.com/css2?family={family}:wght@400;500;600;700'
-        '&family=Playfair+Display:ital,wght@0,600;0,700;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">'
+        '&family=Playfair+Display:ital,wght@0,600;0,700;1,600&family=JetBrains+Mono:wght@400;500&display=swap"'
+        ' rel="stylesheet" media="print" onload="this.media=\'all\'">'
         f"<script>tailwind.config = {json.dumps(config)};</script>"
         f"<style>html,body{{margin:0}}*{{scrollbar-width:thin;scrollbar-color:{t['border']} transparent}}</style></head>"
         f'<body class="bg-background text-foreground font-theme">{themed_placeholders(body, t)}{script}</body></html>'
@@ -204,11 +251,25 @@ async def _llm(settings, messages: list[dict]) -> str:
         raise DesignError(f"The model could not be reached: {exc}")
 
 
+# Emoji only: pictographs and the BMP characters that default to emoji. Check marks, stars and the joiners that
+# Indic scripts need are left alone.
+_EMOJI = re.compile(
+    "[\U0001F300-\U0001FAFF\u231A\u231B\u23E9-\u23F3\u23F8-\u23FA\u2614\u2615\u2648-\u2653\u267F\u2693\u26A1"
+    "\u26AA\u26AB\u26BD\u26BE\u26C4\u26C5\u26CE\u26D4\u26EA\u26F2\u26F3\u26F5\u26FA\u26FD\u2705\u270A\u270B"
+    "\u2728\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797\u27B0\u27BF\u2B1B\u2B1C\u2B50\u2B55\uFE0F]"
+)
+
+
+def strip_emoji(text: str) -> str:
+    """This project shows no emoji, so none is ever stored in a design."""
+    return _EMOJI.sub("", text)
+
+
 def parse_html_block(text: str) -> str | None:
     """The first fenced html block, falling back to any fence, then to raw markup."""
     m = re.search(r"```html\s*\n([\s\S]*?)```", text) or re.search(r"```\w*\s*\n([\s\S]*?)```", text)
     candidate = m.group(1) if m else (text if text.lstrip().startswith("<") else "")
-    body = _inner_body(candidate)
+    body = strip_emoji(_inner_body(candidate))
     return body if body else None
 
 
@@ -241,7 +302,7 @@ def _device_hint(device: str) -> str:
 
 _SCREEN_SYSTEM = (
     "You are a senior product designer who writes polished Tailwind CSS HTML.\n"
-    "Reply with ONLY the contents of <body> in a single ```html fenced block. No <html>, <head> or <script> tags.\n"
+    "Reply with ONLY the contents of <body> in a single ```html fenced block. No <html> or <head> tags.\n"
     "Rules:\n"
     "- Tailwind utility classes only. For brand styling use these theme tokens, never raw hex: "
     "bg-primary, text-primary, text-on-primary, bg-surface, bg-background, text-foreground, text-muted, "
@@ -252,6 +313,16 @@ _SCREEN_SYSTEM = (
     "https://placehold.co/WIDTHxHEIGHT?text=Short+description+of+the+photo (the description is used to find or "
     "generate the real picture, so make it specific). Icons: inline SVG. No other external URLs.\n"
     "- Make it look finished: spacing, hierarchy, states, consistent components across screens.\n"
+    "- Make it usable as a prototype: include a small, self-contained script at the end for tabs, filters, "
+    "menus, dialogs, toggles and demo forms when these controls are present. Use local demo data only. "
+    "Never use fetch, network requests, storage, parent/top access, postMessage, or external scripts. "
+    "When building a single design, implement all requested views within this one HTML body: "
+    "local navigation switches panels, detail actions reveal content, and forms update demo state. "
+    "Do not split the brief into separate mockups or link to pages that are not part of the project. "
+    "Use real anchors with href equal to the destination screen name for navigation between planned screens. "
+    "Keep this prototype code and all interaction states intact when editing.\n"
+    "- Web layouts must adapt at 390px, 768px and 1280px. Collapse sidebars and stack grids at narrow widths; "
+    "never leave text or controls outside the viewport.\n"
     "Design doctrine (from the Claude Design and Apple HIG skills):\n"
     "- Composition first. You are given this screen's surface and composition: follow them. A centered hero plus three equal "
     "feature cards is only right for a Decide/Learn page, never elsewhere. No icon-in-rounded-square above every heading.\n"
@@ -265,18 +336,22 @@ _SCREEN_SYSTEM = (
     "Do not use large numbers just to fill space.\n"
     "- Text over photos always sits on a scrim (for example bg-gradient-to-t from-black/70 via-black/30 to-transparent, or "
     "bg-black/45) with light text, or in a solid panel; never put dark text straight on a photo.\n"
+    "- Never use emoji characters anywhere in the page; draw icons as inline SVG.\n"
     "- Usable: text contrast at least 4.5:1, tap targets at least 44px, visible hover and focus states, clear primary action.\n"
     "- Build the screen completely: every section a real page of this kind has, written out in full with realistic content."
 )
 
 _PLAN_SYSTEM = (
-    "You are an art director planning app or website screens. Reply with ONLY a JSON object, no prose:\n"
+    "You are an art director planning one complete interactive app or website. "
+    "Reply with ONLY a JSON object, no prose:\n"
     '{"project_name": "short name", "direction": "one sentence: the visual mood, layout style and photography style", '
     '"theme": {"primary": "#hex", "on_primary": "#hex", "surface": "#hex", "background": "#hex", "foreground": "#hex", '
     '"muted": "#hex", "border": "#hex", "radius": "12px", "font": "one of: ' + ", ".join(FONTS) + '"}, '
     '"photo_terms": ["2-4 word generic phrases a photo library would match for this brand, e.g. tropical modern house"], '
     '"screens": [{"name": "Home", "surface": "one of: ' + ", ".join(SURFACES) + '", '
-    '"purpose": "one sentence on what it shows", "composition": "one sentence: the layout, e.g. split screen, full-bleed image with overlay, asymmetric grid, editorial columns"}]}\n'
+    '"purpose": "what the complete design includes and how its views interact", "composition": "one sentence: the layout, e.g. split screen, full-bleed image with overlay, asymmetric grid, editorial columns"}]}\n'
+    "Return exactly one item in screens. Cover the entire brief in that design, including local navigation "
+    "and interactive panels for requested app views, or sections for a website. Never propose multiple mockups. "
     "Theme rules: derive the palette from the brand and industry in the brief, never a generic purple/indigo/blue default. "
     "Use hex colors only, keep foreground readable on background, and pick a dark theme when the brand suits it. "
     "Each screen must have a different surface or a clearly different composition. Surfaces: Monitor (watch state), "
@@ -296,7 +371,11 @@ def _planned_theme(theme) -> dict | None:
 
 async def plan_flow(settings, prompt: str, device: str, max_screens: int, existing_names: list[str]) -> dict:
     """Screen plan {project_name, screens}. Falls back to one screen if the model will not give valid JSON."""
-    ask = f"Design brief: {prompt}\nTarget: {_device_hint(device)}\nPlan {'exactly 1 new screen' if max_screens == 1 else f'3 to {max_screens} screens that form one coherent flow'}."
+    ask = (
+        f"Design brief: {prompt}\nTarget: {_device_hint(device)}\n"
+        "Plan exactly 1 complete design. Include the full brief in one interactive app or website, "
+        "with local navigation and view switching where needed. Do not create separate screen mockups."
+    )
     if existing_names:
         ask += f"\nThe project already has these screens, do not repeat them: {', '.join(existing_names)}."
     for attempt in range(2):
@@ -472,8 +551,9 @@ async def generate_screen_body(
     context = "\n".join(f"- {s['name']}: {s['purpose']}" for s in flow)
     text = (
         f"Overall brief: {prompt}\nScreens in this flow:\n{context}\n\n"
-        f"Build the screen \"{screen['name']}\" ({screen['purpose']}) as {_device_hint(device)}. "
-        "Give it its own layout; do not repeat another screen's hero."
+        f"Build the design \"{screen['name']}\" ({screen['purpose']}) as {_device_hint(device)}. "
+        "Implement the full brief in this one design, including working local navigation between "
+        "requested views and meaningful demo interactions. Do not output multiple page mockups."
     )
     if screen.get("surface"):
         text += f"\nSurface: {screen['surface']}. Composition: {screen.get('composition') or 'your choice, distinct from the other screens'}."
@@ -494,7 +574,7 @@ async def generate_screen_body(
     raise DesignError("The model did not return any HTML")
 
 
-async def edit_screen_body(settings, body: str, instruction: str, element_html: str | None) -> str:
+async def edit_screen_body(settings, body: str, instruction: str, element_html: str | None, context: str = "") -> str:
     if element_html:
         task = (
             f"Change ONLY this element (the first one matching it if several do), keep everything else identical:\n"
@@ -504,7 +584,8 @@ async def edit_screen_body(settings, body: str, instruction: str, element_html: 
         task = f"Change: {instruction}\nKeep everything the user did not mention identical."
     messages = [
         {"role": "system", "content": _SCREEN_SYSTEM},
-        {"role": "user", "content": f"Current screen body:\n```html\n{body}\n```\n\n{task}\n\nReturn the complete updated body."},
+        {"role": "user", "content": (f"Recent design conversation (context for the current request):\n{context}\n\n" if context else "")
+            + f"Current screen body:\n```html\n{body}\n```\n\n{task}\n\nReturn the complete updated body."},
     ]
     for attempt in range(2):
         updated = parse_html_block(await _llm(settings, messages))
