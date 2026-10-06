@@ -5,7 +5,7 @@ import dynamic from 'next/dynamic';
 import { toast } from 'sonner';
 import { Sun, Moon, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
-import { API_BASE, requestRegistrationOtp, forgotPassword } from '@/lib/api';
+import { API_BASE, requestRegistrationOtp, verifyRegistrationOtp, forgotPassword } from '@/lib/api';
 import AppLogo from '@/components/ui/AppLogo';
 
 const InteractiveNeuralVortex = dynamic(
@@ -37,6 +37,7 @@ export default function AuthScreen() {
   const [otpCode, setOtpCode] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [successNotice, setSuccessNotice] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
   const [forgotSubmitted, setForgotSubmitted] = useState(false);
@@ -74,6 +75,7 @@ export default function AuthScreen() {
   const handleCredentialsSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setSuccessNotice(null);
     setSubmitting(true);
 
     try {
@@ -99,11 +101,19 @@ export default function AuthScreen() {
   const handleOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setSuccessNotice(null);
     setSubmitting(true);
 
     try {
-      await registerWithOtp(email, password, otpCode);
-      toast.success('Account created successfully!');
+      await verifyRegistrationOtp(email, otpCode, password);
+      toast.success('Account created! Please log in with your email and password.');
+      setMode('login');
+      setStep('credentials');
+      setOtpCode('');
+      setError(null);
+      setShowPassword(false);
+      setPassword('');
+      setSuccessNotice('Account created. Log in to continue.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Verification failed');
     } finally {
@@ -114,6 +124,7 @@ export default function AuthScreen() {
   const handleResendOtp = async () => {
     if (resendCooldown > 0 || submitting) return;
     setError(null);
+    setSuccessNotice(null);
     setSubmitting(true);
 
     try {
@@ -130,6 +141,7 @@ export default function AuthScreen() {
   const handleForgotSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setSuccessNotice(null);
     setSubmitting(true);
 
     try {
@@ -147,6 +159,7 @@ export default function AuthScreen() {
     setStep('credentials');
     setOtpCode('');
     setError(null);
+    setSuccessNotice(null);
     setForgotSubmitted(false);
   };
 
@@ -340,6 +353,7 @@ export default function AuthScreen() {
                   setStep('credentials');
                   setOtpCode('');
                   setError(null);
+                  setSuccessNotice(null);
                 }}
                 className="text-muted-foreground hover:text-foreground transition-colors"
               >
@@ -349,7 +363,13 @@ export default function AuthScreen() {
           </form>
         ) : (
           /* 3. Standard Login / Register Credentials Step */
-          <form onSubmit={handleCredentialsSubmit} className="space-y-3">
+          <>
+            {successNotice && (
+              <div className="mb-3.5 p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-600 dark:text-emerald-400 font-medium text-center">
+                {successNotice}
+              </div>
+            )}
+            <form onSubmit={handleCredentialsSubmit} className="space-y-3">
             <div>
               <label className="text-xs font-medium text-muted-foreground block mb-1">Email</label>
               <input
@@ -408,6 +428,7 @@ export default function AuthScreen() {
               {submitting ? 'Please wait…' : mode === 'login' ? 'Log in' : 'Create account'}
             </button>
           </form>
+        </>
         )}
       </div>
     </div>

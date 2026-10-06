@@ -40,7 +40,7 @@ function MorphingText({ text }: { text: string }) {
 
   return (
     <span
-      className="relative inline-flex items-center justify-center overflow-hidden transition-all duration-300 ease-[cubic-bezier(0.175,0.885,0.32,1.275)]"
+      className="relative inline-flex items-center justify-center overflow-hidden transition-all duration-300 ease-spring"
       style={{ width }}
     >
       <span ref={spanRef} className="invisible whitespace-nowrap px-1">
@@ -251,7 +251,7 @@ function AttachmentThumb({
       style={{ animationDelay: `${index * 35}ms`, animationFillMode: "backwards" }}
       className={cn(
         "group relative size-12 shrink-0 overflow-hidden rounded-xl border border-border bg-muted outline-none",
-        "transition-transform duration-200 ease-[cubic-bezier(0.175,0.885,0.32,1.275)] hover:scale-[1.04] active:scale-[0.96]",
+        "transition-transform duration-200 ease-spring hover:scale-[1.04] active:scale-[0.96]",
         "animate-in fade-in slide-in-from-top-3 zoom-in-90 duration-400"
       )}
       aria-label={attachment.isImage ? `Open preview of ${attachment.name}` : attachment.name}
@@ -271,7 +271,7 @@ function AttachmentThumb({
           onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
           onClick={(e) => { e.stopPropagation(); onRemove(attachment.id); }}
           className={cn(
-            "m-1 flex size-4 items-center justify-center rounded-full bg-background/90 text-foreground/70 shadow-sm transition-all duration-200 ease-[cubic-bezier(0.175,0.885,0.32,1.275)] hover:bg-background hover:text-foreground hover:scale-110",
+            "m-1 flex size-4 items-center justify-center rounded-full bg-background/90 text-foreground/70 shadow-sm transition-all duration-200 ease-spring hover:bg-background hover:text-foreground hover:scale-110",
             isHovered ? "opacity-100 scale-100" : "opacity-0 scale-50 pointer-events-none"
           )}
           aria-label={`Remove ${attachment.name}`}
@@ -370,7 +370,7 @@ function AttachmentGalleryModal({
         style={{ opacity: isOpen ? 1 : 0, transform: isOpen ? "scale(1)" : "scale(0.7)" }}
         className={cn(
           "fixed right-4 top-4 flex size-9 items-center justify-center rounded-full bg-card/90 text-foreground/70 shadow-md backdrop-blur-sm",
-          "transition-all duration-300 ease-[cubic-bezier(0.175,0.885,0.32,1.275)] hover:bg-card hover:text-foreground",
+          "transition-all duration-300 ease-spring hover:bg-card hover:text-foreground",
           !isOpen && "pointer-events-none"
         )}
       >
@@ -1014,7 +1014,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
             {/* Bottom Actions Wrapper - Hides when recording to make space for visualizer */}
             <div
               className={cn(
-                "absolute bottom-2 left-3 right-12 z-[10] flex items-center gap-1.5 transition-all duration-300 ease-[cubic-bezier(0.175,0.885,0.32,1.275)]",
+                "absolute bottom-2 left-3 right-12 z-[10] flex items-center gap-1.5 transition-all duration-300 ease-spring",
                 expanded && !isRecording ? "opacity-100 blur-0 translate-y-0 pointer-events-auto" : "opacity-0 blur-sm translate-y-2 pointer-events-none"
               )}
             >
@@ -1050,8 +1050,8 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                   className={cn(
                     "absolute bottom-full left-0 mb-2.5 z-50 w-48 sm:w-52 rounded-2xl border border-border bg-card p-1.5 shadow-premium-lg flex flex-col gap-0.5 transition-all duration-400 cursor-default",
                     isModelSelectOpen
-                      ? "opacity-100 scale-100 translate-y-0 pointer-events-auto ease-[cubic-bezier(0.34,1.56,0.64,1)]"
-                      : "opacity-0 scale-95 translate-y-3 pointer-events-none ease-[cubic-bezier(0.175,0.885,0.32,1.275)]"
+                      ? "opacity-100 scale-100 translate-y-0 pointer-events-auto ease-spring-bounce"
+                      : "opacity-0 scale-95 translate-y-3 pointer-events-none ease-spring"
                   )}
                 >
                   <div className="flex flex-col gap-0.5">
@@ -1129,7 +1129,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
             {/* Audio Wave Visualizer Overlay positioned precisely to the left of the mic button */}
             <div
               className={cn(
-                "absolute right-12 bottom-2 z-[10] flex h-8 items-center justify-end gap-[3px] transition-all duration-400 ease-[cubic-bezier(0.175,0.885,0.32,1.275)]",
+                "absolute right-12 bottom-2 z-[10] flex h-8 items-center justify-end gap-[3px] transition-all duration-400 ease-spring",
                 isRecording ? "w-16 opacity-100 translate-x-0" : "w-0 opacity-0 translate-x-4 pointer-events-none"
               )}
             >
@@ -1156,13 +1156,13 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
               )}
             >
               <span className="relative flex h-full w-full items-center justify-center">
-                <span className={cn("absolute inset-0 flex items-center justify-center transition-all duration-300 ease-[cubic-bezier(0.175,0.885,0.32,1.275)]", showArrow ? "opacity-100 scale-100 rotate-0 blur-none" : "opacity-0 scale-50 rotate-45 blur-[1px] pointer-events-none")}>
+                <span className={cn("absolute inset-0 flex items-center justify-center transition-all duration-300 ease-spring", showArrow ? "opacity-100 scale-100 rotate-0 blur-none" : "opacity-0 scale-50 rotate-45 blur-[1px] pointer-events-none")}>
                   <ArrowUpIcon />
                 </span>
-                <span className={cn("absolute inset-0 flex items-center justify-center transition-all duration-300 ease-[cubic-bezier(0.175,0.885,0.32,1.275)]", showMic ? "opacity-100 scale-100 rotate-0 blur-none" : "opacity-0 scale-50 -rotate-45 blur-[1px] pointer-events-none")}>
+                <span className={cn("absolute inset-0 flex items-center justify-center transition-all duration-300 ease-spring", showMic ? "opacity-100 scale-100 rotate-0 blur-none" : "opacity-0 scale-50 -rotate-45 blur-[1px] pointer-events-none")}>
                   <MicIcon />
                 </span>
-                <span className={cn("absolute inset-0 flex items-center justify-center transition-all duration-300 ease-[cubic-bezier(0.175,0.885,0.32,1.275)]", showStop ? "opacity-100 scale-100 rotate-0 blur-none" : "opacity-0 scale-50 rotate-45 blur-[1px] pointer-events-none")}>
+                <span className={cn("absolute inset-0 flex items-center justify-center transition-all duration-300 ease-spring", showStop ? "opacity-100 scale-100 rotate-0 blur-none" : "opacity-0 scale-50 rotate-45 blur-[1px] pointer-events-none")}>
                   <StopIcon />
                 </span>
               </span>

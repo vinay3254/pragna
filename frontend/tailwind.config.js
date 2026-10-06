@@ -117,6 +117,10 @@ module.exports = {
         'blink': 'blink 0.8s ease-in-out infinite',
         'thinking': 'thinking-pulse 1.4s ease-in-out infinite',
       },
+      transitionTimingFunction: {
+        spring: 'cubic-bezier(0.175, 0.885, 0.32, 1.275)',
+        'spring-bounce': 'cubic-bezier(0.34, 1.56, 0.64, 1)',
+      },
     },
   },
   plugins: [

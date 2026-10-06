@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
-import { AGENT_TOOLS_SCHEMA, executeTool } from '@/lib/agent-tools';
+import { AGENT_TOOLS_SCHEMA, executeTool, imageToImage } from '@/lib/agent-tools';
+import { needsLiveSearch, needsTools } from '@/lib/tool-routing';
 import { INDIAN_LANGUAGE_MAP } from '@/lib/indianLanguages';
 import { getModelConfig } from '@/lib/modelDisplayNames';
 import { getMcpToolSchemas } from '@/lib/mcpClient';
@@ -9,6 +10,8 @@ import * as path from 'node:path';
 
 export const runtime = 'nodejs';
 export const maxDuration = 120;
+
+const BACKEND_URL = (process.env.BACKEND_URL || 'http://localhost:8000').replace(/\/+$/, '');
 
 // Ollama Cloud is the only provider. Every UI model id resolves to an Ollama cloud model.
 const OLLAMA_MODELS = new Set(['gemma4:cloud', 'gemma4:31b-cloud', 'nemotron-3-super:cloud', 'minimax-m3:cloud']);
@@ -46,6 +49,7 @@ Voice, Tone & Personality (PRAGNA 1-A Standard):
   - Use bullet points (- or •) with **Bold Lead-in Labels** (e.g., • **Feature Name**: detailed explanation...) for scannable, punchy readability.
   - NEVER dump long, dense walls of plain unbroken paragraphs.
 - Proportionality:
+  - Match the length and format of the reply to the message. Greetings, thanks, small talk, and short questions get a short, plain reply in 1-2 sentences, with no headers, bullets, or follow-up pitch.
   - For simple, direct factual questions, provide a direct, concise answer.
   - For concepts, technologies, guides, or analyses, provide a structured, beautifully formatted breakdown.
 - Artifacts Convention:
@@ -55,6 +59,13 @@ Voice, Tone & Personality (PRAGNA 1-A Standard):
     \`\`\`
   - For \`language="html"\` artifacts specifically, write a complete, self-contained HTML document (starting with <!DOCTYPE html>, with inline CSS/JS) for a live interactive preview.
 - Standard Code Blocks: For short code snippets (≤20 lines), terminal commands, or examples in explanations, use standard markdown code blocks.
+- Media & Image Generation Capabilities:
+  - You HAVE full, active AI image generation capabilities (powered by FLUX and Stability AI).
+  - When the user asks you to generate, create, draw, make, or visualize an image or picture:
+    - NEVER state or imply that you cannot generate or render images.
+    - NEVER suggest external tools like Midjourney or DALL-E instead of producing the image.
+    - ALWAYS present the generated image directly using markdown image syntax: ![Descriptive Title](image_url).
+    - After generate_image succeeds, include the returned \`markdown\` value verbatim in the reply so the image displays; if it fails, tell the user the exact error.
 - Document Download Links: Document tools (create_word_document, create_pdf_document, create_spreadsheet, create_presentation) return a \`download_url\` field — ALWAYS use that exact value verbatim as the link target: [Download DocumentName.ext](download_url). Never invent or guess a different link path.
 - Editing Existing Files: If the user asks to change, add to, or fix a document/spreadsheet/presentation you already created in this conversation, call the matching edit_* tool (edit_word_document, edit_spreadsheet) with \`path\` set to the exact \`download_url\` string that the earlier create_* tool result returned — do not create a new file for an edit request.
 - Diagrams: When generating architectural or flow diagrams, use Mermaid blocks (\`\`\`mermaid).
@@ -74,6 +85,9 @@ function sseChunk(content: string): string {
     choices: [{ delta: { content: stripEmojis(content) } }],
   })}\n\n`;
 }
+
+// Appended after the base prompt so it also applies to custom prompts saved in settings.
+const REPLY_SIZE_DIRECTIVE = `[REPLY SIZE]: Match the reply to the message. For greetings ("hi", "hello"), thanks, small talk, or one-line questions, answer in 1-2 plain sentences: no section headers, no bullet lists, no self-introduction. Use headers and bullets only when the user asks for an explanation, comparison, or guide. Do not mention your name, company, team, or model tier unless the user asks about them.`;
 
 // Helper to detect if user is specifically asking about what model/AI they are interacting with
 function isModelIdentityQuery(query: string): boolean {
@@ -160,7 +174,6 @@ function queryNeedsTools(messages: any[]): boolean {
 // ── Per-user memory ──────────────────────────────────────────────────────────
 // Memories live in the backend database and are scoped to the logged-in user by their auth token.
 // Nothing is kept in a shared file, so one user's facts can never reach another user's prompt.
-const BACKEND_URL = 'http://localhost:8000';
 const MEMORY_CACHE_TTL_MS = 30_000;
 const MEMORY_CACHE_MAX_USERS = 200;
 const _memoryCache = new Map<string, { at: number; items: string[] }>();
@@ -280,7 +293,6 @@ ${memoryLines}
   return { userName, userNickname, promptBlock };
 }
 
-
 function getOmnirouteKey(): string {
   try {
     const omniEnvPath = path.join(process.env.HOME || '/home/vinay', '.omniroute', '.env');
@@ -297,24 +309,8 @@ function getOmnirouteKey(): string {
 }
 
 function mapOmnirouteModel(model: string): string {
-  switch (model) {
-    case 'claude-sonnet-4-5':
-      return 'auto/best-coding';
-    case 'claude-opus-4-5':
-      return 'gpt-6-astra-high';
-    case 'claude-haiku-3-5':
-      return 'auto/fast';
-    case 'deepseek-chat':
-    case 'deepseek-v3':
-      return 'auto/best-coding';
-    case 'google/gemma-4-31b-it:free':
-    case 'gemma-free':
-      return 'auto/best-free';
-    case 'nvidia/nemotron-3-super-120b-a12b:free':
-      return 'auto/best-free';
-    default:
-      return 'auto/best-coding';
-  }
+  if (model?.startsWith('antigravity/')) return model;
+  return 'antigravity/gemini-2.5-flash';
 }
 
 function getBackendOllamaKeys(): string[] {
@@ -344,83 +340,254 @@ function getBackendOllamaKeys(): string[] {
   return keys;
 }
 
-async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: string; resultsText: string } | null> {
+async function detectAndExecuteWebSearch(messages: any[]): Promise<{ query: string; resultsText: string; failed?: boolean } | null> {
   if (!messages || messages.length === 0) return null;
   const lastMsg = (messages[messages.length - 1]?.content || '').trim();
   if (!lastMsg) return null;
-  const lower = lastMsg.toLowerCase();
 
-  // 1. Skip pure greetings and conversational pleasantries
-  const isGreeting = /^(hi|hello|hey|greetings|good morning|good evening|good afternoon|howdy|sup|thanks|thank you|bye|goodbye|ok|okay)[!.? ]*$/i.test(lastMsg);
-  if (isGreeting) return null;
+  // Live search adds seconds to every reply, so only run it when the message needs fresh information.
+  if (!needsLiveSearch(lastMsg)) return null;
+  const query = lastMsg.slice(0, 200).trim();
+  if (!query) return null;
 
-  // Plain date/time questions are answered from the live clock in the system prompt, not from search results.
-  if (/^\W*(what('s|s| is| was)?|tell me)\s+(the\s+)?(current\s+|today'?s?\s+)?(date|time|day)(\s+and\s+(date|time|day))?(\s+(now|today|right now))?\W*$/i.test(lastMsg)) return null;
-
-  // 2. Skip pure arithmetic
-  if (/^what is \d+[\s+\-*/^]+\d+/i.test(lastMsg) || /^calculate /i.test(lastMsg)) return null;
-
-  // 3. Skip pure generic coding requests that have NO real-world entity, model, or product names
-  const isPureGenericCoding = /^(write|create|implement|give me|show me)\s+(a\s+)?(python|javascript|typescript|c\+\+|java|rust|go|html|css|sql|function|script|algorithm|regex|class)\s+(to\s+|for\s+)?(reverse|sort|find|sum|calculate|loop|print|check|validate)\b/i.test(lastMsg);
-  if (isPureGenericCoding) return null;
-
-  // 4. Auto-search runs for every remaining message (greetings, arithmetic, date/time and pure
-  // generic coding are skipped above). A URL in the message is searched as-is.
-  const urlMatch = lastMsg.match(/https?:\/\/[^\s]+/i);
-
-  let query = '';
-
-  if (urlMatch) {
-    // If the message is a URL or contains a URL, search for that exact URL or page
-    query = urlMatch[0];
-  } else {
-    // Clean query of conversational prefixes
-    query = lastMsg
-      .replace(/\b(dont u know|don't you know|did you know|can you|could you|please|use search|search for|search|google it|google|look up|tell me about|tell me|who is|what is|why is)\b/gi, ' ')
-      .replace(/[?!,.:;"]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    // Check if query has pronouns or is a short follow-up: enrich with earlier subjects
-    const hasPronouns = /\b(he|him|his|she|her|they|them|their|it|its|that|this|the actor|the politician|the model|the company|the quote|the statement)\b/i.test(lastMsg);
-    if (hasPronouns || query.split(' ').length <= 4 || messages.length > 2) {
-      const priorUserMessages = messages
-        .slice(0, -1)
-        .filter((m: any) => m.role === 'user')
-        .map((m: any) => m.content)
-        .join(' ');
-
-      const priorClean = priorUserMessages
-        .replace(/\b(hi|hello|who is|what is|tell me|about|and|famous|for|dont u know|did you know|use search)\b/gi, ' ')
-        .replace(/[?!,.:;"]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      if (priorClean) {
-        const priorWords = priorClean.split(/\s+/).filter(w => w.length > 3);
-        const missingWords = priorWords.filter(w => !lower.includes(w.toLowerCase()));
-        if (missingWords.length > 0) {
-          query = `${missingWords.slice(0, 3).join(' ')} ${query}`.trim();
-        }
-      }
-    }
+  // Cap the wait: a slow search provider must not stall the answer. A timeout means "answer without search".
+  const SEARCH_BUDGET_MS = 4000;
+  const timedOut = Symbol('search-timeout');
+  const guarded = await Promise.race([
+    runWebSearch(lastMsg, query),
+    new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), SEARCH_BUDGET_MS)),
+  ]);
+  if (guarded === timedOut) {
+    console.warn(`[Chat API] web search exceeded ${SEARCH_BUDGET_MS}ms for "${query}", answering without it`);
+    return null;
   }
+  return guarded;
+}
 
-  query = query.slice(0, 200);
-  if (!query || query.length < 3) return null;
-
+async function runWebSearch(lastMsg: string, query: string): Promise<{ query: string; resultsText: string; failed?: boolean }> {
   try {
-    const searchRes = await executeTool('web_search', { query });
+    let searchRes = await executeTool('web_search', { query });
     if (searchRes && Array.isArray(searchRes.results) && searchRes.results.length > 0) {
       const topResults = searchRes.results.slice(0, 8);
       const resultsText = topResults
         .map((r: any, idx: number) => `[${idx + 1}] ${r.title}\n${r.snippet || ''}\nURL: ${r.url}`)
         .join('\n\n');
-      return { query, resultsText };
+      return { query, resultsText, failed: false };
     }
+
+    // Try a cleaned query if the exact message returned no results
+    const cleanQuery = lastMsg
+      .replace(/[?!,.:;"]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 200);
+
+    if (cleanQuery && cleanQuery !== query) {
+      searchRes = await executeTool('web_search', { query: cleanQuery });
+      if (searchRes && Array.isArray(searchRes.results) && searchRes.results.length > 0) {
+        const topResults = searchRes.results.slice(0, 8);
+        const resultsText = topResults
+          .map((r: any, idx: number) => `[${idx + 1}] ${r.title}\n${r.snippet || ''}\nURL: ${r.url}`)
+          .join('\n\n');
+        return { query: cleanQuery, resultsText, failed: false };
+      }
+    }
+
+    return { query, resultsText: '', failed: true };
   } catch (err) {
     console.warn('Auto search execution failed:', err);
+    return { query, resultsText: '', failed: true };
   }
+}
+
+// Links of images this app actually saved. The model sometimes invents /generated_images/ links, so check the disk.
+function existingGeneratedImage(candidates: string[]): string | null {
+  const baseDir = process.cwd().endsWith('frontend') ? process.cwd() : path.join(process.cwd(), 'frontend');
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const name = path.basename(candidates[i]);
+    if (fs.existsSync(path.join(baseDir, 'public', 'generated_images', name))) return candidates[i];
+  }
+  return null;
+}
+
+// The picture an edit request refers to: the photo attached to the latest message, else the newest generated image.
+function findSourceImage(messages: any[]): string | null {
+  const last = messages[messages.length - 1];
+  if (Array.isArray(last?.images) && last.images.length > 0) return last.images[last.images.length - 1];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const found = existingGeneratedImage(String(messages[i]?.content || '').match(/\/generated_images\/[\w.-]+/g) || []);
+    if (found) return found;
+  }
+  return null;
+}
+
+// The message asks to change a picture: either a photo attached to it, or the image generated a moment ago.
+async function detectAndExecuteImageEdit(messages: any[], onStart?: () => void): Promise<{ prompt: string; imageUrl?: string; markdown?: string; error?: string } | null> {
+  const last = messages[messages.length - 1];
+  const text = String(last?.content || '').trim();
+  if (!text) return null;
+  if (/^(what|who|where|when|why|how|describe|explain|read|analy[sz]e|tell me|is |are |does |do |can you (see|tell|read|describe))\b/i.test(text)) return null;
+
+  const attached = Array.isArray(last?.images) && last.images.length > 0 ? last.images[last.images.length - 1] : null;
+  let source: string | null = attached;
+
+  if (attached) {
+    const editIntent = /\b(edit|change|modify|make|turn|convert|transform|restyle|redraw|re-?colou?r|colou?rize|remove|replace|add|enhance|upscale|cartoon|anime|ghibli|painting|sketch|watercolou?r|pixel|oil paint|3d|style|background|filter)\b/i;
+    if (!editIntent.test(text)) return null;
+  } else {
+    // Follow-up like "make it black" right after an image was generated.
+    let shown: string | null = null;
+    let shownAt = -1;
+    for (let i = messages.length - 2; i >= Math.max(0, messages.length - 6); i--) {
+      shown = existingGeneratedImage(String(messages[i]?.content || '').match(/\/generated_images\/[\w.-]+/g) || []);
+      if (shown) { shownAt = i; break; }
+    }
+    if (!shown) return null;
+    const startsWithEditVerb = /^(please\s+)?(can you\s+|could you\s+)?(make|turn|change|edit|convert|transform|add|remove|replace|re-?colou?r|colou?rize|paint|redo|redraw|give|put|use)\b/i.test(text);
+    // "make pig blue": the follow-up names the subject from the prompt that produced the image.
+    const imagePrompt = String(messages.slice(0, shownAt).reverse().find((m: any) => m?.role === 'user')?.content || '');
+    const subjectWords = (imagePrompt.toLowerCase().match(/[a-z]{3,}/g) || [])
+      .filter(w => !/^(make|generate|create|draw|render|paint|produce|give|show|image|picture|photo|illustration|the|and|with|for|of|please|can|you|could|me)$/.test(w));
+    const namesSubject = subjectWords.some(w => new RegExp(`\\b${w}s?\\b`, 'i').test(text));
+    const refersToImage = namesSubject || /\b(it|this|that|him|her|them|the (image|picture|photo|background|lion|animal|subject))\b/i.test(text);
+    const wantsNewImage = /\b(new|another|different|fresh)\b.*\b(image|picture|photo)\b|\b(image|picture|photo|drawing|illustration)\s+of\b/i.test(text);
+    const short = text.split(/\s+/).length <= 14;
+    if (!(startsWithEditVerb && refersToImage && short) || wantsNewImage) return null;
+    source = shown;
+  }
+  if (!source) return null;
+
+  onStart?.();
+  const result = await imageToImage({ image: source, prompt: text });
+  if (result.success) return { prompt: text, imageUrl: result.imageUrl, markdown: result.markdown };
+  return { prompt: text, error: result.error || 'Image editing failed.' };
+}
+
+async function detectAndExecuteImageGeneration(messages: any[], onStart?: () => void): Promise<{ prompt: string; imageUrl?: string; markdown?: string; error?: string } | null> {
+  if (!messages || messages.length === 0) return null;
+  const lastMsg = (messages[messages.length - 1]?.content || '').trim();
+  if (!lastMsg) return null;
+
+  // Check for image generation phrases
+  const isImageRequest = /\b(generate|create|draw|make|design|render|paint|produce|give me|show me)\b.*\b(image|picture|photo|illustration|drawing|painting|artwork|graphic|portrait|wallpaper|sketch|logo|icon|poster|banner|avatar|emblem|mockup|thumbnail|cartoon|meme)\b/i.test(lastMsg)
+    || /\b(image|picture|photo|illustration|drawing|painting|logo|poster|banner|avatar)\s+(of|for)\b/i.test(lastMsg)
+    || /^draw\s+/i.test(lastMsg);
+
+  // A pasted image prompt with no "make an image" verb, e.g. "A cinematic,
+  // hyper-realistic portrait of ... 8k, 85mm lens". Two or more render-style
+  // markers is a prompt, not a question about photography.
+  const STYLE_MARKERS = /\b(photo-?realistic|hyper-?realistic|cinematic|8k|4k|\d{2,3}mm( lens)?|depth of field|bokeh|studio lighting|dramatic lighting|volumetric|octane|unreal engine|concept art|digital art|ultra[- ]detailed|highly detailed|trending on artstation)\b/gi;
+  const isPastedPrompt = new Set((lastMsg.match(STYLE_MARKERS) || []).map((m: string) => m.toLowerCase())).size >= 2
+    && !/\?\s*$/.test(lastMsg);
+
+  // Exclude requests to write code or generic file queries
+  const isCodingRequest = /\b(write|create|implement)\s+(?:a\s+)?(?:python|javascript|typescript|c\+\+|html|css|component|function|api|endpoint|sql|script)\b/i.test(lastMsg);
+  if (isCodingRequest && !/\b(image|photo|picture)\b/i.test(lastMsg)) return null;
+
+  if (!isImageRequest && !isPastedPrompt) return null;
+
+  // Extract clean prompt (a pasted prompt is already clean)
+  let prompt = !isPastedPrompt ? lastMsg
+    .replace(/\b(can you|could you|please|kindly|i want you to|help me|generate me|generate|create me|create|draw me|draw|make me|make|render me|render|paint me|paint|produce|give me|show me)\b/gi, ' ')
+    .replace(/\b(an?|the|some)?\s*(image|picture|photo|illustration|drawing|painting|artwork|graphic|portrait|wallpaper|sketch)\s*(of|for|about|with|depicting|showing)?\b/gi, ' ')
+    .replace(/[?!,.:;"]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() : lastMsg;
+
+  if (!prompt || prompt.length < 2) {
+    prompt = lastMsg;
+  }
+
+  let aspectRatio = '1:1';
+  if (/\b(16:9|widescreen|landscape|horizontal|desktop)\b/i.test(lastMsg)) aspectRatio = '16:9';
+  else if (/\b(9:16|portrait|vertical|mobile|phone|story)\b/i.test(lastMsg)) aspectRatio = '9:16';
+  else if (/\b(4:3)\b/i.test(lastMsg)) aspectRatio = '4:3';
+  else if (/\b(3:4)\b/i.test(lastMsg)) aspectRatio = '3:4';
+
+  try {
+    onStart?.();
+    const res = await executeTool('image_generate', { prompt, aspect_ratio: aspectRatio });
+    const imgUrl = res?.image_url || res?.imageUrl;
+    if (res && res.success && imgUrl) {
+      return {
+        prompt,
+        imageUrl: imgUrl,
+        markdown: res.markdown || `![${prompt}](${imgUrl})`,
+      };
+    }
+    return { prompt, error: res?.error || 'The image service returned no image.' };
+  } catch (err: any) {
+    console.warn('detectAndExecuteImageGeneration error:', err);
+    return { prompt, error: err?.message || 'Image generation failed.' };
+  }
+}
+
+async function detectAndExecuteDocumentGeneration(messages: any[]): Promise<{ title: string; format: string; downloadUrl: string; filename: string } | null> {
+  if (!messages || messages.length === 0) return null;
+  const lastMsg = (messages[messages.length - 1]?.content || '').trim();
+  if (!lastMsg) return null;
+
+  // Detect requested format
+  let format: 'pdf' | 'docx' | 'xlsx' | 'pptx' | null = null;
+  if (/\b(pdf|to pdf|as pdf|in pdf|into pdf|pdf format|pdf file|pdf document)\b/i.test(lastMsg)) format = 'pdf';
+  else if (/\b(word|docx|doc|word document|word format|docx format|to docx|as docx)\b/i.test(lastMsg)) format = 'docx';
+  else if (/\b(excel|spreadsheet|xlsx|csv|sheets|to excel|as excel|excel format)\b/i.test(lastMsg)) format = 'xlsx';
+  else if (/\b(powerpoint|presentation|slides|pptx|deck|slide deck|to pptx|as pptx)\b/i.test(lastMsg)) format = 'pptx';
+
+  if (!format) return null;
+
+  // Check if this is a document generation/conversion request
+  const isDocRequest =
+    /\b(change|convert|export|format|generate|create|make|download|save|produce|turn|give me|render|switch|provide)\b/i.test(lastMsg) ||
+    /^(to|as|into|in)\s+(pdf|docx|word|excel|pptx|presentation|spreadsheet)/i.test(lastMsg) ||
+    /\b(in|as|into|to)\s+(pdf|docx|word|excel|spreadsheet|presentation|pptx)\s*(format|file|document)?\b/i.test(lastMsg);
+
+  if (!isDocRequest) return null;
+
+  // Determine content & title:
+  let content = '';
+  let title = 'Executive Document';
+
+  const priorAssistantMsg = [...messages]
+    .slice(0, -1)
+    .reverse()
+    .find((m: any) => m.role === 'assistant')?.content || '';
+
+  if (lastMsg.length < 90 && priorAssistantMsg) {
+    content = priorAssistantMsg;
+    const headingMatch = priorAssistantMsg.match(/^#+\s*(.+)$/m) || priorAssistantMsg.match(/\*\*([^*]+)\*\*/);
+    if (headingMatch) title = headingMatch[1].trim();
+    else title = 'Generated Document';
+  } else {
+    content = lastMsg;
+    title = lastMsg
+      .replace(/\b(can you|could you|please|kindly|generate me|generate|create me|create|make me|make|export|download|change|convert|in|to|as|pdf|docx|word|excel|spreadsheet|presentation|pptx|format|file|document)\b/gi, ' ')
+      .replace(/[?!,.:;"]/g, ' ')
+      .trim()
+      .slice(0, 40) || 'Document';
+  }
+
+  try {
+    let toolName = 'create_pdf_document';
+    if (format === 'docx') toolName = 'create_word_document';
+    else if (format === 'xlsx') toolName = 'create_spreadsheet';
+    else if (format === 'pptx') toolName = 'create_presentation';
+
+    const res = await executeTool(toolName, { title, content, format });
+    if (res && res.success && res.download_url) {
+      const cleanTitle = title.replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'Document';
+      const filename = `${cleanTitle}.${format}`;
+      return {
+        title,
+        format,
+        downloadUrl: res.download_url,
+        filename,
+      };
+    }
+  } catch (err) {
+    console.warn('detectAndExecuteDocumentGeneration error:', err);
+  }
+
   return null;
 }
 
@@ -510,6 +677,7 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
     const systemPromptParts = [
       basePrompt,
       modelIdentityDirective,
+      REPLY_SIZE_DIRECTIVE,
       `[CURRENT DATE & TIME]: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'short' })} (IST). Use this for any question about today's date, day, or time. Never guess it.`,
       promptBlock ? `[USER CONTEXT & PERSISTENT MEMORIES]:\n${promptBlock}` : '',
       languageDirective,
@@ -571,9 +739,43 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
     // Real-time automatic web search resolution
     const autoSearch = await searchPromise;
     if (autoSearch) {
+      if (autoSearch.failed || !autoSearch.resultsText) {
+        conversationHistory.push({
+          role: 'system',
+          content: `[REAL-TIME LIVE SEARCH FAILED for "${autoSearch.query}"]:\nLive web search could not retrieve current real-time results for this query.\n\nCRITICAL INSTRUCTION: You must inform the user clearly and directly that live web search failed or returned no results for "${autoSearch.query}". Do NOT attempt to answer from your pre-trained memory as if it were current, and do not present outdated information as current facts. State plainly that live search was unavailable and you cannot verify the latest current information.`,
+        });
+      } else {
+        conversationHistory.push({
+          role: 'system',
+          content: `[LIVE REAL-TIME WEB SEARCH RESULTS for "${autoSearch.query}"]:\n${autoSearch.resultsText}\n\nCRITICAL MANDATORY INSTRUCTIONS:
+- You have active internet access via real-time live search.
+- The results above reflect the current live facts as of today (${new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full' })}).
+- You MUST answer the user's inquiry directly, truthfully, and accurately based on these live real-time search results.
+- NEVER contradict these live search results with outdated information from your base pre-training weights.
+- State the facts and current status clearly and directly.`,
+        });
+      }
+    }
+
+function sanitizeForLlm(text: string): string {
+  if (!text) return '';
+  // Strip huge base64 data URLs from LLM prompts to prevent exceeding the model context limit (262k chars)
+  return text.replace(/data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]{50,}/g, '[image data]');
+}
+
+    // Direct Document Generation resolution (PDF, Word DOCX, Excel XLSX, PowerPoint PPTX)
+    const autoDoc = await detectAndExecuteDocumentGeneration(messages);
+    if (autoDoc) {
       conversationHistory.push({
         role: 'system',
-        content: `[LIVE WEB SEARCH RESULTS for "${autoSearch.query}"]:\n${autoSearch.resultsText}\n\nINSTRUCTION: Answer the user's inquiry directly, accurately, and honestly using these real-time search results. State the facts clearly without preamble or unnecessary disclaimers.\nThe results can disagree because some pages are outdated. When they conflict, trust the result that gives the most recent explicit date (for example "assumed office on June 3, 2026") over generic or list pages that only say "current" or "latest". Today is ${new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full' })}. If any result reports a change of office or a newer event, the older claim is outdated: report the newer one and do not mention the outdated one as current.`,
+        content: `[DOCUMENT GENERATION RESULT for "${autoDoc.title}"]:\nA physical ${autoDoc.format.toUpperCase()} document has been successfully generated and is available for download at: ${autoDoc.downloadUrl}
+
+CRITICAL MANDATORY INSTRUCTIONS:
+- The requested ${autoDoc.format.toUpperCase()} document has been created successfully.
+- You MUST provide a clear, direct download link to the file in your response using exact markdown syntax:
+  [Download ${autoDoc.filename}](${autoDoc.downloadUrl})
+- Briefly introduce the generated file and confirm that it is ready for download.
+- NEVER say your document rendering engine is experiencing an outage or that you cannot generate physical files.`,
       });
     }
 
@@ -582,7 +784,7 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
     // and require inline [n] citations back to them.
     if (Array.isArray(sourceDocumentIds) && sourceDocumentIds.length > 0 && lastUserMessage) {
       try {
-        const ragRes = await fetch('http://localhost:8000/api/tools/rag_search', {
+        const ragRes = await fetch(`${BACKEND_URL}/api/tools/rag_search`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: lastUserMessage, document_ids: sourceDocumentIds, top_k: 6 }),
@@ -618,6 +820,45 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
       }
     }
 
+    // Runs inside the stream so the client can show a status while the picture is made (often 30-75s).
+    const runImageStep = async (onImageStart: (editing: boolean) => void) => {
+      // Image-to-image: a photo attached with an edit instruction. Text-to-image only runs when no edit was attempted.
+      const imageStart = Date.now();
+      const imageAttempt = (await detectAndExecuteImageEdit(messages, () => onImageStart(true)).catch(() => null)) ?? (await detectAndExecuteImageGeneration(messages, () => onImageStart(false)));
+      if (imageAttempt) console.log(`[Chat API] image step ${Date.now() - imageStart}ms: ${imageAttempt.imageUrl || 'FAILED ' + String(imageAttempt.error).slice(0, 300)}`);
+      if (imageAttempt?.error) {
+        // Without this the model invents a picture and describes it as if it existed.
+        const editing = hasImages || /^(please\s+)?(can you\s+|could you\s+)?(make|turn|change|edit|convert|transform|add|remove|replace|re-?colou?r|colou?rize|paint|redo|redraw|give|put|use)\b/i.test(String(messages[messages.length - 1]?.content || ''));
+        conversationHistory.push({
+          role: 'system',
+          content: `[IMAGE ${editing ? 'EDIT' : 'GENERATION'} FAILED]: The ${editing ? 'image editing' : 'image generation'} service failed: ${imageAttempt.error}\nTell the user plainly that no image was created and give the short reason. Do NOT write an image markdown tag, do NOT describe an image, and do NOT claim one exists. Offer to try again later.`,
+        });
+      }
+      if (!imageAttempt) {
+        conversationHistory.push({
+          role: 'system',
+          content: 'Pictures are made only by the image tools, never by you. Do not write markdown image tags or invent image URLs. If the user wants a picture changed or created, tell them to describe the change, and do not claim an image exists.',
+        });
+      }
+      const autoImage = imageAttempt?.imageUrl
+        ? { prompt: imageAttempt.prompt, imageUrl: imageAttempt.imageUrl, markdown: imageAttempt.markdown || '' }
+        : null;
+      if (autoImage) {
+        conversationHistory.push({
+          role: 'system',
+          content: `[IMAGE GENERATION RESULT for "${autoImage.prompt}"]:\nAn image has been successfully generated for the user's request.
+Image URL: ${autoImage.imageUrl}
+Image Markdown: ${autoImage.markdown}
+
+CRITICAL INSTRUCTIONS:
+- Present the image to the user using this exact markdown tag: ${autoImage.markdown}
+- Briefly describe the visual atmosphere of the generated image.
+- Do NOT output '[image data]' or placeholder tokens.`,
+        });
+      }
+      return autoImage;
+    };
+
     const stream = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
@@ -632,6 +873,14 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
           assistantResponseText += text;
           controller.enqueue(encoder.encode(sseChunk(text)));
         };
+
+        // A status line the client shows until the first real text arrives.
+        const autoImage = await runImageStep((editing) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ status: editing ? 'Editing image… this can take about a minute.' : 'Creating image… this can take about a minute.' })}\n\n`));
+        }).catch((err) => {
+          console.warn('[Chat API] image step crashed:', err);
+          return null;
+        });
 
         const OLLAMA_CHAT_URL = 'https://api.ollama.com/api/chat';
 
@@ -658,7 +907,7 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
         const toOllamaMessages = (history: any[]) =>
           history.map((m) => {
             if (m.role === 'tool') {
-              return { role: 'tool', tool_name: m.name, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) };
+              return { role: 'tool', tool_name: m.name, content: typeof m.content === 'string' ? sanitizeForLlm(m.content) : JSON.stringify(m.content) };
             }
             if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
               const toolCalls = m.tool_calls.map((tc: any) => {
@@ -668,12 +917,31 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
                 }
                 return { function: { name: tc.function?.name, arguments: args } };
               });
-              return { role: 'assistant', content: flattenContent(m.content), tool_calls: toolCalls };
+              return { role: 'assistant', content: sanitizeForLlm(flattenContent(m.content)), tool_calls: toolCalls };
             }
             const images = extractImages(m.content);
             return images.length > 0
-              ? { role: m.role, content: flattenContent(m.content), images }
-              : { role: m.role, content: flattenContent(m.content) };
+              ? { role: m.role, content: sanitizeForLlm(flattenContent(m.content)), images }
+              : { role: m.role, content: sanitizeForLlm(flattenContent(m.content)) };
+          });
+
+        const toOpenAIMessages = (history: any[]) =>
+          history.map((m) => {
+            const sanitized = typeof m.content === 'string' ? sanitizeForLlm(m.content) : m.content;
+            if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+              return {
+                ...m,
+                content: sanitized,
+                tool_calls: m.tool_calls.map((tc: any) => ({
+                  ...tc,
+                  function: {
+                    ...tc.function,
+                    arguments: typeof tc.function?.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function?.arguments ?? {}),
+                  },
+                })),
+              };
+            }
+            return { ...m, content: sanitized };
           });
 
         // Stream OpenAI-compatible response WITH tool call detection
@@ -726,23 +994,6 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
           }));
         };
 
-        // Omniroute speaks the OpenAI format, where tool-call arguments are JSON strings.
-        const toOpenAIMessages = (history: any[]) =>
-          history.map((m) =>
-            m.role === 'assistant' && Array.isArray(m.tool_calls)
-              ? {
-                  ...m,
-                  tool_calls: m.tool_calls.map((tc: any) => ({
-                    ...tc,
-                    function: {
-                      ...tc.function,
-                      arguments: typeof tc.function?.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function?.arguments ?? {}),
-                    },
-                  })),
-                }
-              : m
-          );
-
         // Streams one Ollama /api/chat response: text goes to the client as it arrives,
         // tool calls are collected for the caller to execute.
         const streamOllama = async (res: Response): Promise<{ text: string; toolCalls: any[] }> => {
@@ -792,11 +1043,78 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
         try {
           const MAX_ROUNDS = 5;
           let streamedSuccess = false;
-          let toolsEnabled = enableTools !== false;
+          // Skip the tool schema and tool loop for messages that only need a plain answer.
+          let toolsEnabled = enableTools !== false && needsTools(lastUserMessage);
           let lastError = '';
 
-          // 1. Ollama Cloud (fast path), with the full tool set via native tool calling.
+          // 1. OmniRoute Gateway (Primary) — routes to best coding model
+          const omniKey = getOmnirouteKey();
+          if (omniKey && !hasImages) {
+            try {
+              const omniUrl = 'http://127.0.0.1:20128/v1/chat/completions';
+              let omniModel = mapOmnirouteModel(model);
+              for (let round = 0; round < MAX_ROUNDS; round++) {
+                // The last round runs without tools so the model has to write a final answer.
+                const withTools = toolsEnabled && round < MAX_ROUNDS - 1;
+                const post = (m: string) =>
+                  fetch(omniUrl, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${omniKey}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      model: m,
+                      messages: toOpenAIMessages(conversationHistory),
+                      ...(withTools ? { tools: fullToolsSchema, tool_choice: 'auto' } : {}),
+                      temperature,
+                      max_tokens: 1500,
+                      stream: true,
+                    }),
+                    signal: AbortSignal.timeout(25000),
+                  });
+                let res: Response | null = null;
+                try {
+                  res = await post(omniModel);
+                } catch (netErr: any) {
+                  console.warn('Omniroute request failed:', netErr.message);
+                }
+                if (res && !res.ok && omniModel !== 'auto/best-free') {
+                  console.warn(`[Chat API] OmniRoute ${omniModel} returned ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+                  omniModel = 'auto/best-free';
+                  try { res = await post(omniModel); } catch {}
+                }
+                if (!res || !res.ok) break;
 
+                const toolCalls = await streamWithTools(res);
+                if (!toolCalls || toolCalls.length === 0) {
+                  streamedSuccess = true;
+                  console.log(`[Chat API] answered by OmniRoute (${omniModel})`);
+                  generateMentionedDocument(assistantResponseText);
+                  break;
+                }
+
+                conversationHistory.push({
+                  role: 'assistant',
+                  content: assistantResponseText,
+                  tool_calls: toolCalls.map((tc, idx) => ({
+                    id: tc.id || `call_${round}_${idx}`,
+                    type: 'function',
+                    function: { name: tc.function?.name, arguments: tc.function?.arguments ?? '{}' },
+                  })),
+                });
+                for (const [idx, tc] of toolCalls.entries()) {
+                  const toolName = tc.function?.name;
+                  let toolArgs: Record<string, any> = {};
+                  try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+                  console.log(`[Chat API] OmniRoute round ${round} tool: ${toolName} ${tc.function?.arguments?.slice(0, 120) ?? ''}`);
+                  const result = await executeTool(toolName, toolName === 'edit_image' && !toolArgs.image ? { ...toolArgs, image: findSourceImage(messages) } : toolArgs, userAuthToken);
+                  conversationHistory.push({ role: 'tool', tool_call_id: tc.id || `call_${round}_${idx}`, name: toolName, content: JSON.stringify(result) });
+                }
+              }
+            } catch (omniErr) {
+              console.warn('OmniRoute error, attempting fallback:', omniErr);
+            }
+          }
+
+          // 2. Ollama Cloud Fallback
           for (let round = 0; round < MAX_ROUNDS && !streamedSuccess; round++) {
             // The last round runs without tools so the model has to write a final answer.
             const withTools = toolsEnabled && round < MAX_ROUNDS - 1;
@@ -868,79 +1186,16 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
               if (typeof toolArgs === 'string') {
                 try { toolArgs = JSON.parse(toolArgs); } catch { toolArgs = {}; }
               }
-              const result = await executeTool(toolName, toolArgs, userAuthToken);
-              conversationHistory.push({ role: 'tool', tool_call_id: `call_${round}_${idx}`, name: toolName, content: JSON.stringify(result) });
-            }
-          }
-
-          // 2. Omniroute (local gateway) as the fallback when Ollama Cloud did not answer.
-          // Image messages skip it: only Ollama's gemma4 vision path handles them.
-          const omniKey = getOmnirouteKey();
-          if (!streamedSuccess && omniKey && !hasImages) {
-            try {
-              const omniUrl = 'http://127.0.0.1:20128/v1/chat/completions';
-              let omniModel = mapOmnirouteModel(model);
-              for (let round = 0; round < MAX_ROUNDS; round++) {
-                const post = (m: string) =>
-                  fetch(omniUrl, {
-                    method: 'POST',
-                    headers: { Authorization: `Bearer ${omniKey}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      model: m,
-                      messages: toOpenAIMessages(conversationHistory),
-                      ...(toolsEnabled ? { tools: fullToolsSchema, tool_choice: 'auto' } : {}),
-                      temperature,
-                      max_tokens: 1500,
-                      stream: true,
-                    }),
-                    signal: AbortSignal.timeout(25000),
-                  });
-                let res: Response | null = null;
-                try {
-                  res = await post(omniModel);
-                } catch (netErr: any) {
-                  console.warn('Omniroute request failed:', netErr.message);
-                }
-                if (res && !res.ok && omniModel !== 'auto/best-free') {
-                  omniModel = 'auto/best-free';
-                  try { res = await post(omniModel); } catch {}
-                }
-                if (!res || !res.ok) break;
-
-                const toolCalls = await streamWithTools(res);
-                if (!toolCalls || toolCalls.length === 0) {
-                  streamedSuccess = true;
-                  console.log(`[Chat API] answered by Omniroute (${omniModel})`);
-                  break;
-                }
-
-                conversationHistory.push({
-                  role: 'assistant',
-                  content: null,
-                  tool_calls: toolCalls.map((tc) => ({
-                    id: tc.id,
-                    type: 'function',
-                    function: { name: tc.function.name, arguments: tc.function.arguments },
-                  })),
-                });
-                for (const tc of toolCalls) {
-                  const toolName = tc.function?.name;
-                  let toolArgs: Record<string, any> = {};
-                  try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch {}
-                  const result = await executeTool(toolName, toolArgs, userAuthToken);
-                  conversationHistory.push({
-                    role: 'tool',
-                    tool_call_id: tc.id,
-                    name: toolName,
-                    content: JSON.stringify(result),
-                  });
-                }
+              const result = await executeTool(toolName, toolName === 'edit_image' && !toolArgs.image ? { ...toolArgs, image: findSourceImage(messages) } : toolArgs, userAuthToken);
+              let toolContent = JSON.stringify(result);
+              if (toolContent.length > 20000) {
+                toolContent = toolContent.replace(/data:[^;]+;base64,[A-Za-z0-9+/=]+/g, '[binary data omitted]').slice(0, 20000);
               }
-            } catch (err: any) {
-              // A timeout or broken stream here must not throw: fall through to the error message below.
-              console.warn('Omniroute fallback failed:', err?.message);
+              conversationHistory.push({ role: 'tool', tool_call_id: `call_${round}_${idx}`, name: toolName, content: toolContent });
             }
           }
+
+
 
           if (!streamedSuccess) {
             sendText(`\n\n*(Error: could not get a response from Ollama or Omniroute${lastError ? `: ${lastError}` : ''}.)*\n`);
@@ -949,6 +1204,14 @@ Every sentence, greeting, and explanation MUST be in ${langInfo.name} (${langInf
           console.error('Agent loop error:', err);
           sendText(`\n\n*(Error: ${err.message || 'Unknown error'})*\n`);
         } finally {
+          if (autoImage) {
+            if (assistantResponseText.includes('[image data]')) {
+              // The model emitted a placeholder: append the real image markdown
+              sendText(`\n\n${autoImage.markdown}\n`);
+            } else if (!assistantResponseText.includes(autoImage.imageUrl)) {
+              sendText(`\n\n${autoImage.markdown}\n`);
+            }
+          }
           if (ragCitations.length > 0) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ citations: ragCitations })}\n\n`));
           }

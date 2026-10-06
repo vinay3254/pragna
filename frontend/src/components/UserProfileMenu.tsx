@@ -20,7 +20,7 @@ interface UserProfileMenuProps {
 export default function UserProfileMenu({
   onOpenSearch,
   className = '',
-  defaultPlan = 'Pro',
+  defaultPlan = 'Free',
 }: UserProfileMenuProps) {
   const { user, logout } = useAuth();
 
@@ -87,6 +87,9 @@ export default function UserProfileMenu({
     setMenuOpen(false);
     logout();
   };
+
+  const activePlan = (user?.plan || defaultPlan || 'Free').toLowerCase();
+  const planLabel = activePlan === 'pro' ? 'Pro' : 'Free';
 
   return (
     <div className={`relative ${className}`}>
@@ -156,7 +159,7 @@ export default function UserProfileMenu({
             <span className="text-[#f0e6d3] font-medium truncate group-hover:text-primary transition-colors">
               {displayName}
             </span>
-            <span className="text-primary font-semibold text-xs tracking-tight">· {defaultPlan}</span>
+            <span className="text-primary font-semibold text-xs tracking-tight">· {planLabel}</span>
           </div>
 
           {/* Chevron */}

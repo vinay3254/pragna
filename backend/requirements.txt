@@ -18,3 +18,5 @@ python-docx
 openpyxl
 python-pptx
 reportlab
+ddgs
+Pillow

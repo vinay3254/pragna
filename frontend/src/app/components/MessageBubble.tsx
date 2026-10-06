@@ -114,15 +114,18 @@ export default function MessageBubble({
   const exactTimestamp = formatExactTimestamp(message.timestamp);
   const inlineTime = formatInlineTime(message.timestamp);
 
-  // Detect any referenced or generated document files (.docx, .pdf, .xlsx, .csv, .pptx)
+  // Detect generated document files (.docx, .pdf, .xlsx, .csv, .pptx). Only real
+  // download links count -- a bare filename (e.g. an uploaded file the reply
+  // mentions) is not something we can serve.
   const detectedDocFiles = useMemo(() => {
     if (message.role !== 'assistant' || !message.content) return [];
-    const regex = /(?:Download Link:\s*\[?|File Name:\s*`?|generated_docs\/|\b)([a-zA-Z0-9_\- ]+\.(docx|pdf|xlsx|csv|pptx))\b/gi;
+    const regex = /(?:\/api\/documents\/download\/|generated_docs\/)([a-zA-Z0-9_\-. %()]+?\.(docx|pdf|xlsx|csv|pptx))\b/gi;
     const matches: { filename: string; ext: string }[] = [];
     const seen = new Set<string>();
     let m;
     while ((m = regex.exec(message.content)) !== null) {
-      const clean = m[1].trim();
+      let clean = m[1].trim();
+      try { clean = decodeURIComponent(clean); } catch {}
       const ext = m[2].toLowerCase();
       if (!seen.has(clean) && clean.length > 4) {
         seen.add(clean);
@@ -345,8 +348,8 @@ export default function MessageBubble({
 
       {message.role === 'user' ? (
         <div className="flex justify-end message-enter group/msg">
-          <div className="flex flex-col items-end gap-0.5">
-            <div className="relative max-w-[85%]">
+          <div className="flex flex-col items-end gap-0.5 max-w-[85%]">
+            <div className="relative inline-block max-w-full">
               {/* Tooltip */}
               {exactTimestamp && (
                 <div className="absolute -top-7 right-0 z-10 pointer-events-none opacity-0 group-hover/msg:opacity-100 transition-opacity duration-150">
@@ -366,6 +369,16 @@ export default function MessageBubble({
                         alt={`Attached photo ${i + 1}`}
                         className="max-w-[200px] max-h-[200px] rounded-lg object-cover border border-border/50"
                       />
+                    ))}
+                  </div>
+                )}
+                {message.files && message.files.length > 0 && (
+                  <div className="flex flex-wrap justify-end gap-2 mb-2">
+                    {message.files.map((name) => (
+                      <div key={name} className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/40 px-3 py-2 text-xs">
+                        <FileText size={14} className="text-primary shrink-0" />
+                        <span className="truncate max-w-[220px]">{name}</span>
+                      </div>
                     ))}
                   </div>
                 )}

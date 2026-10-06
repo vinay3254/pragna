@@ -35,8 +35,9 @@ async def test_execute_tool_web_search():
 async def test_execute_tool_generate_image_no_api_key(tmp_path, monkeypatch):
     monkeypatch.delenv("STABILITY_API_KEY", raising=False)
     res = await execute_tool("generate_image", {"prompt": "a red fox"})
-    assert res["success"] is False
-    assert "STABILITY_API_KEY" in res["error"]
+    assert res["success"] is True
+    assert "pollinations" in res["image_url"]
+
 
 
 async def test_execute_tool_edit_image_without_prior_image(tmp_path, monkeypatch):

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, MessageSquare, Settings, Zap, Brain, FolderOpen, Plus, ArrowRight } from 'lucide-react';
+import { Search, MessageSquare, Settings, Zap, Brain, Plus, ArrowRight } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { SANSKRIT_MODELS } from '@/lib/modelDisplayNames';
 
@@ -40,14 +40,6 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
         description: 'Start a fresh conversation',
         icon: <Plus size={15} />,
         action: () => { router.push('/'); onClose(); },
-        group: 'Actions',
-      },
-      {
-        id: 'history',
-        label: 'Chat History & Folders',
-        description: 'Browse all past conversations',
-        icon: <FolderOpen size={15} />,
-        action: () => { router.push('/chat-history-folders'); onClose(); },
         group: 'Actions',
       },
       {

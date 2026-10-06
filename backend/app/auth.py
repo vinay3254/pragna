@@ -46,7 +46,13 @@ async def get_current_user(request: Request, authorization: str = Header(None)) 
     if not user:
         raise HTTPException(status_code=401, detail="User no longer exists")
 
-    return {"id": user["id"], "email": user["email"], "name": user["name"], "avatar_url": user["avatar_url"]}
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "name": user["name"],
+        "avatar_url": user["avatar_url"],
+        "plan": user.get("plan", "free"),
+    }
 
 
 async def get_optional_current_user(request: Request, authorization: str = Header(None)) -> dict:
@@ -58,7 +64,13 @@ async def get_optional_current_user(request: Request, authorization: str = Heade
             try:
                 user = repository.get_user(request.app.state.conn, int(payload["sub"]))
                 if user:
-                    return {"id": user["id"], "email": user["email"], "name": user["name"], "avatar_url": user["avatar_url"]}
+                    return {
+                        "id": user["id"],
+                        "email": user["email"],
+                        "name": user["name"],
+                        "avatar_url": user["avatar_url"],
+                        "plan": user.get("plan", "free"),
+                    }
             except Exception:
                 pass
 
@@ -66,5 +78,11 @@ async def get_optional_current_user(request: Request, authorization: str = Heade
     guest = repository.get_user_by_email(conn, "guest@pragna.ai")
     if not guest:
         uid = repository.create_user(conn, "guest@pragna.ai", hash_password("GuestPass2026!"), name="Guest")
-        return {"id": uid, "email": "guest@pragna.ai", "name": "Guest", "avatar_url": None}
-    return {"id": guest["id"], "email": guest["email"], "name": guest["name"], "avatar_url": guest.get("avatar_url")}
+        return {"id": uid, "email": "guest@pragna.ai", "name": "Guest", "avatar_url": None, "plan": "free"}
+    return {
+        "id": guest["id"],
+        "email": guest["email"],
+        "name": guest["name"],
+        "avatar_url": guest.get("avatar_url"),
+        "plan": guest.get("plan", "free"),
+    }

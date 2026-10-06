@@ -31,7 +31,6 @@ interface ChatWindowProps {
   onOpenCommandPalette?: () => void;
   onOpenTools?: () => void;
   sources?: Source[];
-  onAttachSource?: (source: Source) => void;
   onRemoveSource?: (sourceId: number) => void;
   selectedLanguage?: string;
   onSelectLanguage?: (code: string) => void;
@@ -54,7 +53,6 @@ export default function ChatWindow({
   onOpenCommandPalette,
   onOpenTools,
   sources = [],
-  onAttachSource,
   onRemoveSource,
   selectedLanguage = 'en',
   onSelectLanguage = () => {},
@@ -194,58 +192,13 @@ export default function ChatWindow({
           ) : (
             !sidebarOpen && (
               <div className="flex items-center">
-                <AppLogo size={24} variant="full" />
+                <AppLogo size={22} variant="full" />
               </div>
             )
           )}
         </div>
 
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {/* Command Palette */}
-          {onOpenCommandPalette && (
-            <button
-              onClick={onOpenCommandPalette}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-muted border border-border/60 transition-all"
-              title="Command Palette (Cmd+K)"
-            >
-              <Search size={13} />
-              <span className="hidden md:inline text-[0.6875rem] font-mono bg-muted-foreground/10 px-1 py-0.5 rounded">⌘K</span>
-            </button>
-          )}
-
-          {/* Tools & Skills */}
-          {onOpenTools && (
-            <button
-              onClick={onOpenTools}
-              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted border border-border/60 transition-all"
-              title="Tools & Skills"
-            >
-              <Wrench size={14} />
-            </button>
-          )}
-
-          {/* Artifacts side panel toggle */}
-          {onToggleArtifact && (
-            <button
-              onClick={onToggleArtifact}
-              className={`p-1.5 rounded-lg border transition-all ${
-                isArtifactOpen
-                  ? 'bg-primary/15 text-primary border-primary/30'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-muted border-border/60'
-              }`}
-              title="Toggle Artifacts Side Panel"
-            >
-              <LayoutGrid size={14} />
-            </button>
-          )}
-
-          {/* Plan badge */}
-          <div className="hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground/70 ml-1">
-            <span className="px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-[0.6875rem] font-medium tracking-wide">
-              Free
-            </span>
-          </div>
-
           {hasMessages && (
             <button
               onClick={handleExport}
@@ -317,7 +270,7 @@ export default function ChatWindow({
 
       {/* Input area — only shown when conversation is active */}
       {hasMessages && (
-        <div className="flex-shrink-0 px-4 pb-4 pt-3 border-t border-border/30 bg-background/80 backdrop-blur-md">
+        <div className="flex-shrink-0 px-4 pb-4 pt-3 bg-background/80 backdrop-blur-md">
           <div className="max-w-chat mx-auto flex flex-col items-center">
             {/* Attached sources — added via the + inside the reply box below */}
             {sources.length > 0 && (
@@ -359,21 +312,22 @@ export default function ChatWindow({
                 const imageFiles = allFiles.filter(f => f.type.startsWith('image/'));
                 const docFiles = allFiles.filter(f => !f.type.startsWith('image/'));
 
-                if (docFiles.length > 0) {
-                  for (const file of docFiles) {
-                    try {
-                      const doc = await uploadDocument(file);
-                      onAttachSource?.({ id: doc.id, filename: doc.filename, chunkCount: doc.chunk_count });
-                      toast.success(`Added "${doc.filename}" as a source.`);
-                    } catch (err) {
-                      toast.error(err instanceof Error ? err.message : `Failed to attach "${file.name}"`);
-                    }
+                // Pass uploads straight to onSendMessage: attaching via state first
+                // races the send, so the reply would go out without the sources.
+                const uploaded: Source[] = [];
+                for (const file of docFiles) {
+                  try {
+                    const doc = await uploadDocument(file);
+                    uploaded.push({ id: doc.id, filename: doc.filename, chunkCount: doc.chunk_count });
+                    toast.success(`Added "${doc.filename}" as a source.`);
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : `Failed to attach "${file.name}"`);
                   }
                 }
 
                 const images = imageFiles.length > 0 ? await filesToDataUrls(imageFiles) : undefined;
                 const finalMsg = msg.trim() || (docFiles.length > 0 ? `Take a look at ${docFiles.map(f => f.name).join(', ')}.` : msg);
-                onSendMessage(finalMsg, images, undefined, meta?.language, chosenModelId);
+                onSendMessage(finalMsg, images, uploaded.length > 0 ? uploaded : undefined, meta?.language, chosenModelId);
               }}
               placeholder="Reply to PRAGNA 1-A..."
               initialModel={selectedModel?.label || "Tvarā"}

@@ -5,10 +5,10 @@ import { useRouter } from 'next/navigation';
 import {
   Plus,
   MessageSquare,
-  Folder,
   CalendarClock,
   Clock,
   LayoutGrid,
+  Palette,
   Sun,
   Moon,
   Trash2,
@@ -19,6 +19,9 @@ import {
   Search,
   Settings,
   LogOut,
+  Sparkles,
+  ChevronDown,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { Conversation, ConversationGroup } from '../types/chat';
 import AppLogo from '@/components/ui/AppLogo';
@@ -40,6 +43,7 @@ interface SidebarProps {
   onOpenArtifacts?: () => void;
   onOpenTools?: () => void;
   onOpenSearch?: () => void;
+  onOpenImageStudio?: () => void;
 }
 
 export default function Sidebar({
@@ -56,8 +60,33 @@ export default function Sidebar({
   onOpenArtifacts,
   onOpenTools,
   onOpenSearch,
+  onOpenImageStudio,
 }: SidebarProps) {
   const router = useRouter();
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  const [listFilter, setListFilter] = useState<'all' | 'scheduled'>('all');
+  const filterMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      setMoreOpen(localStorage.getItem('sidebar_more_open') === '1');
+    } catch {}
+  }, []);
+  useEffect(() => {
+    if (!filterMenuOpen) return;
+    const close = (e: MouseEvent) => {
+      if (filterMenuRef.current && !filterMenuRef.current.contains(e.target as Node)) setFilterMenuOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [filterMenuOpen]);
+  const toggleMore = () => {
+    setMoreOpen((prev) => {
+      try { localStorage.setItem('sidebar_more_open', prev ? '0' : '1'); } catch {}
+      return !prev;
+    });
+  };
   const { user, logout } = useAuth();
   const [hoverConvId, setHoverConvId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -105,6 +134,10 @@ export default function Sidebar({
     setDeleteConfirmId(null);
   };
 
+  const visibleConversations = groupedConversations
+    .flatMap((group) => group.conversations)
+    .filter((conv) => listFilter === 'all' || String(conv.id).startsWith('sched-'));
+
   return (
     <>
       {/* Mobile overlay */}
@@ -128,13 +161,14 @@ export default function Sidebar({
         <div className="flex flex-col h-full w-[260px]">
           {/* Header */}
           <div className="flex items-center justify-between px-3 py-3 flex-shrink-0">
-            <div
-              className="flex items-center cursor-pointer select-none py-0.5"
+            <button
+              type="button"
+              className="flex min-h-8 items-center rounded-md select-none py-0.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
               onClick={onNewConversation}
               title="PRAGNA 1-A - Start new chat"
             >
               <AppLogo size={30} variant="full" />
-            </div>
+            </button>
             <button
               onClick={onToggle}
               className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-colors duration-150"
@@ -157,87 +191,105 @@ export default function Sidebar({
             </button>
           </div>
 
-          {/* Nav items */}
-          <div className="px-3 pb-3 flex-shrink-0 space-y-0.5">
+          {/* More (collapsible shortcuts) */}
+          <div className="px-3 pb-1 flex-shrink-0">
             <button
-              onClick={() => router.push('/chat-history-folders')}
-              className="flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-all duration-150 group"
+              onClick={toggleMore}
+              className="flex items-center gap-2.5 w-full px-2 py-1.5 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-colors duration-150"
+              aria-expanded={moreOpen}
             >
-              <Folder size={17} strokeWidth={1.8} className="flex-shrink-0 text-muted-foreground group-hover:text-foreground transition-colors" />
-              <span className="flex-1 text-left">Folders & Projects</span>
+              <ChevronDown size={16} strokeWidth={1.8} className={`flex-shrink-0 transition-transform duration-200 ${moreOpen ? '' : '-rotate-90'}`} />
+              <span className="flex-1 text-left">More</span>
             </button>
-            <button
-              onClick={() => router.push('/tasks')}
-              className="flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-all duration-150 group"
-            >
-              <Clock size={17} strokeWidth={1.8} className="flex-shrink-0 text-muted-foreground group-hover:text-foreground transition-colors" />
-              <span className="flex-1 text-left">Scheduled</span>
-            </button>
-            <button
-              onClick={onOpenArtifacts}
-              className="flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-all duration-150 group"
-            >
-              <LayoutGrid size={17} strokeWidth={1.8} className="flex-shrink-0 text-muted-foreground group-hover:text-foreground transition-colors" />
-              <span className="flex-1 text-left">Artifacts Panel</span>
-            </button>
+            {moreOpen && (
+              <div className="mt-0.5 space-y-0.5">
+                <button
+                  onClick={() => router.push('/tasks')}
+                  className="flex items-center gap-2.5 w-full pl-3 pr-2 py-1.5 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-colors duration-150 group"
+                >
+                  <Clock size={16} strokeWidth={1.8} className="flex-shrink-0" />
+                  <span className="flex-1 text-left">Scheduled</span>
+                </button>
+                <button
+                  onClick={() => router.push('/design')}
+                  className="flex items-center gap-2.5 w-full pl-3 pr-2 py-1.5 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-colors duration-150 group"
+                >
+                  <Palette size={16} strokeWidth={1.8} className="flex-shrink-0" />
+                  <span className="flex-1 text-left">Design</span>
+                </button>
+                <button
+                  onClick={onOpenArtifacts}
+                  className="flex items-center gap-2.5 w-full pl-3 pr-2 py-1.5 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-hover transition-colors duration-150 group"
+                >
+                  <LayoutGrid size={16} strokeWidth={1.8} className="flex-shrink-0" />
+                  <span className="flex-1 text-left">Artifacts</span>
+                </button>
+              </div>
+            )}
           </div>
-
-          <div className="mx-3 border-t border-sidebar-border mb-3 flex-shrink-0" />
 
           {/* Chats and tasks header */}
-          <div className="flex items-center justify-between px-4 mb-1.5 flex-shrink-0">
-            <span className="text-[0.6875rem] font-semibold text-muted-foreground/60 uppercase tracking-widest">
-              Recents
-            </span>
+          <div className="relative flex items-center justify-between pl-5 pr-3 mt-3 mb-1 flex-shrink-0" ref={filterMenuRef}>
+            <span className="text-xs font-medium text-muted-foreground">Chats and tasks</span>
             <button
-              onClick={onOpenSearch}
-              className="p-1 rounded-md text-muted-foreground/60 hover:text-foreground hover:bg-sidebar-hover transition-colors duration-150"
-              title="Search (Cmd+K)"
+              onClick={() => setFilterMenuOpen((prev) => !prev)}
+              className={`p-1 rounded-md transition-colors duration-150 hover:text-foreground hover:bg-sidebar-hover ${listFilter !== 'all' ? 'text-primary' : 'text-muted-foreground'}`}
+              title="Filter"
+              aria-label="Filter chats"
             >
-              <Search size={12} />
+              <SlidersHorizontal size={14} />
             </button>
+            {filterMenuOpen && (
+              <div className="absolute right-3 top-full mt-1 z-40 w-44 rounded-xl border border-border bg-popover shadow-lg p-1">
+                {([['all', 'All chats'], ['scheduled', 'Scheduled tasks']] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    onClick={() => { setListFilter(value); setFilterMenuOpen(false); }}
+                    className="flex items-center justify-between w-full px-2.5 py-1.5 rounded-lg text-xs text-foreground hover:bg-sidebar-hover"
+                  >
+                    <span>{label}</span>
+                    {listFilter === value && <Check size={12} className="text-primary" />}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
-          {/* Conversation list */}
+          {/* Conversation list: one flat, newest-first list */}
           <div className="flex-1 overflow-y-auto px-2 pb-2 min-h-0">
-            {groupedConversations.length === 0 ? (
+            {visibleConversations.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-10 px-4 text-center">
                 <div className="w-10 h-10 rounded-2xl bg-muted/60 flex items-center justify-center mb-3">
                   <MessageSquare size={18} className="text-muted-foreground/40" />
                 </div>
-                <p className="text-xs font-medium text-muted-foreground/70">No conversations yet</p>
-                <p className="text-xs text-muted-foreground/40 mt-1">Start a new chat to begin</p>
+                <p className="text-xs font-medium text-muted-foreground/70">
+                  {listFilter === 'scheduled' ? 'No scheduled task results yet' : 'No conversations yet'}
+                </p>
+                <p className="text-xs text-muted-foreground/40 mt-1">
+                  {listFilter === 'scheduled' ? 'Results appear here after a task runs' : 'Start a new chat to begin'}
+                </p>
               </div>
             ) : (
-              groupedConversations.map((group) => (
-                <div key={`group-${group.label}`} className="mb-4">
-                  <div className="px-2 py-1 mb-0.5">
-                    <span className="text-[0.625rem] font-semibold text-muted-foreground/50 uppercase tracking-widest">
-                      {group.label}
-                    </span>
-                  </div>
-                  {group.conversations.map((conv) => (
-                    <ConversationItem
-                      key={conv.id}
-                      conv={conv}
-                      isActive={conv.id === activeConversationId}
-                      isHovered={hoverConvId === conv.id}
-                      isRenaming={renamingId === conv.id}
-                      isDeleteConfirm={deleteConfirmId === conv.id}
-                      renameValue={renameValue}
-                      renameInputRef={renameInputRef}
-                      onSelect={onSelectConversation}
-                      onHover={setHoverConvId}
-                      onStartRename={startRename}
-                      onRenameChange={setRenameValue}
-                      onCommitRename={commitRename}
-                      onCancelRename={cancelRename}
-                      onDeleteClick={handleDeleteClick}
-                      onConfirmDelete={confirmDelete}
-                      onCancelDelete={cancelDelete}
-                    />
-                  ))}
-                </div>
+              visibleConversations.map((conv) => (
+                <ConversationItem
+                  key={conv.id}
+                  conv={conv}
+                  isActive={conv.id === activeConversationId}
+                  isHovered={hoverConvId === conv.id}
+                  isRenaming={renamingId === conv.id}
+                  isDeleteConfirm={deleteConfirmId === conv.id}
+                  renameValue={renameValue}
+                  renameInputRef={renameInputRef}
+                  onSelect={onSelectConversation}
+                  onHover={setHoverConvId}
+                  onStartRename={startRename}
+                  onRenameChange={setRenameValue}
+                  onCommitRename={commitRename}
+                  onCancelRename={cancelRename}
+                  onDeleteClick={handleDeleteClick}
+                  onConfirmDelete={confirmDelete}
+                  onCancelDelete={cancelDelete}
+                />
               ))
             )}
           </div>
@@ -282,10 +334,10 @@ function ConversationItem({
   return (
     <div
       className={`
-        group relative flex items-center gap-2 px-2.5 py-1.5 rounded-lg
-        text-left transition-all duration-150 cursor-pointer
+        group relative flex items-center gap-3 pl-3 pr-2 py-1.5 rounded-lg
+        text-left transition-colors duration-150 cursor-pointer
         ${isActive
-          ? 'bg-primary/15 text-primary border border-primary/25 font-medium'
+          ? 'bg-sidebar-hover text-foreground'
           : 'text-muted-foreground hover:text-foreground hover:bg-sidebar-hover'
         }
       `}
@@ -293,9 +345,15 @@ function ConversationItem({
       onMouseEnter={() => onHover(conv.id)}
       onMouseLeave={() => onHover(null)}
     >
-      {/* Active indicator */}
-      {isActive && (
-        <div className="w-1.5 h-1.5 rounded-full bg-primary flex-shrink-0 shadow-[0_0_8px_rgba(212,175,55,0.8)]" />
+      {/* Bullet: ring for chats, clock for scheduled results, gold dot when open */}
+      {String(conv.id).startsWith('sched-') ? (
+        <Clock size={13} strokeWidth={1.8} className={`flex-shrink-0 ${isActive ? 'text-primary' : 'text-muted-foreground/70'}`} aria-label="Scheduled task" />
+      ) : (
+        <span
+          className={`w-[7px] h-[7px] rounded-full flex-shrink-0 border ${
+            isActive ? 'bg-primary border-primary shadow-[0_0_6px_rgba(212,175,55,0.7)]' : 'border-muted-foreground/50'
+          }`}
+        />
       )}
 
       {isRenaming ? (
@@ -329,7 +387,7 @@ function ConversationItem({
         </div>
       ) : (
         <>
-          <span className="flex-1 truncate text-sm leading-snug">{conv.title}</span>
+          <span className="flex-1 truncate text-sm leading-snug">{conv.title.replace(/^\u23f0\uFE0F?\s*/, '')}</span>
 
           {(isHovered || isActive) && (
             <div className="flex items-center gap-0.5 flex-shrink-0">

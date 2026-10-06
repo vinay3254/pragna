@@ -1,23 +1,21 @@
-FROM python:3.11-slim
-
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# System deps for chromadb, httpx, bs4
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    build-essential \
-    && rm -rf /var/lib/apt-get/lists/*
+    build-essential curl git \
+    && rm -rf /var/lib/apt/lists/*
 
+# Install Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browser & system dependencies
-RUN playwright install chromium --with-deps
-
+# Copy app code
 COPY . .
+
+# Create data dirs
+RUN mkdir -p data/documents data/chroma_db
 
 EXPOSE 8000
 

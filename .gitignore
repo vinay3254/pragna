@@ -6,13 +6,20 @@
 !/.gitignore
 
 # Documents and specifications
+docs/
+documents/
 *.docx
 *.pdf
+*.xlsx
+*.pptx
+*.structure.json
+
+# Markdown documents except root README
+*.md
+!/README.md
 
 # Extra root files, scripts and legacy launchers
 claudechat*
-docs/
-documents/
 .github/
 package.json
 docker-compose.yml
@@ -37,6 +44,9 @@ frontend/.next/
 frontend/out/
 frontend/build/
 frontend/public/generated_docs/
+frontend/public/generated_images/
+frontend/documents/
+frontend/get_trending.py
 frontend/isro_2026_mission_roadmap.md
 frontend/.vercel/
 

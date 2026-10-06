@@ -343,6 +343,7 @@ export interface AuthUser {
   email: string;
   name: string | null;
   avatar_url: string | null;
+  plan?: string | null;
 }
 
 export interface AuthResponse {
@@ -516,4 +517,65 @@ export function getVoiceWebSocketUrl(): string {
   const host = base.replace(/^https?:\/\//, '');
   return `${wsProto}//${host}/api/voice/ws`;
 }
+
+export interface BillingOrderResponse {
+  order_id: number;
+  amount: number;
+  currency: string;
+  provider: string;
+}
+
+export interface BillingConfirmResponse {
+  success: boolean;
+  plan: string;
+  current_period_end: string | null;
+}
+
+export interface BillingStatusResponse {
+  plan: string;
+  current_period_end: string | null;
+}
+
+export async function createBillingOrder(): Promise<BillingOrderResponse> {
+  const res = await fetch(`${API_BASE}/api/billing/create-order`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ..._authHeaders(),
+    },
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create billing order');
+  }
+  return res.json();
+}
+
+export async function confirmDemoPayment(orderId: number): Promise<BillingConfirmResponse> {
+  const res = await fetch(`${API_BASE}/api/billing/confirm-demo-payment`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ..._authHeaders(),
+    },
+    body: JSON.stringify({ order_id: orderId }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to confirm payment');
+  }
+  return res.json();
+}
+
+export async function getBillingStatus(): Promise<BillingStatusResponse> {
+  const res = await fetch(`${API_BASE}/api/billing/status`, {
+    headers: _authHeaders(),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to fetch billing status');
+  }
+  return res.json();
+}
+
 
