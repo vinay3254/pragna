@@ -14,6 +14,8 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger("pragna.search")
 SEARCH_TIMEOUT = 12
+OMNIROUTE_SEARCH_PROVIDER = "duckduckgo-free"
+OMNIROUTE_LEAD = 3  # seconds OmniRoute gets before the direct scrapers start
 CACHE_TTL = 30
 CACHE_LIMIT = 128
 _cache: dict[str, tuple[float, dict]] = {}
@@ -103,6 +105,17 @@ async def _brave(query):
         return response.json().get("web", {}).get("results", [])
 
 
+async def _omniroute(query):
+    # OmniRoute searches from its own host, so hosted backends avoid blocked datacenter IPs.
+    base = os.getenv("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128").rstrip("/")
+    async with httpx.AsyncClient(timeout=8) as client:
+        response = await client.post(f"{base}/v1/search",
+                                     json={"query": query, "provider": OMNIROUTE_SEARCH_PROVIDER, "max_results": 8},
+                                     headers={"Authorization": f"Bearer {os.environ['OMNIROUTE_API_KEY']}"})
+        response.raise_for_status()
+        return response.json().get("results", [])
+
+
 def _failure(query, reason):
     return {"success": False, "query": query, "provider": None, "results": [], "count": 0,
             "error": reason, "summary": reason}
@@ -138,9 +151,14 @@ async def _run(query):
             logger.info("Search provider %s failed: %s", name, type(exc).__name__)
         return None
 
-    tasks = [asyncio.create_task(attempt("ddgs", _ddgs)),
-             asyncio.create_task(attempt("duckduckgo-html", _html_search, 1)),
-             asyncio.create_task(attempt("duckduckgo-lite", _lite_search, 2))]
+    tasks = []
+    lead = 0
+    if os.getenv("OMNIROUTE_API_KEY", "").strip():
+        tasks.append(asyncio.create_task(attempt("omniroute", _omniroute)))
+        lead = OMNIROUTE_LEAD
+    tasks += [asyncio.create_task(attempt("ddgs", _ddgs, lead)),
+              asyncio.create_task(attempt("duckduckgo-html", _html_search, lead + 1)),
+              asyncio.create_task(attempt("duckduckgo-lite", _lite_search, lead + 2))]
     key = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
     if key and not key.lower().startswith(("your", "placeholder")):
         tasks.append(asyncio.create_task(attempt("brave", _brave)))
