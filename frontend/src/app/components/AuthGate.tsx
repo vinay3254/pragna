@@ -15,7 +15,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   const [showSplash, setShowSplash] = useState<boolean | null>(null);
 
   useEffect(() => {
-    if (pathname === '/auth/callback' || pathname === '/reset-password') {
+    if (pathname === '/auth/callback' || pathname === '/reset-password' || pathname.startsWith('/share/')) {
       setShowSplash(false);
       return;
     }
@@ -53,9 +53,9 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     };
   }, [showSplash]);
 
-  // The OAuth callback and password reset pages must run while logged out --
-  // gating them behind "is there a user yet" would prevent them from ever mounting.
-  if (pathname === '/auth/callback' || pathname === '/reset-password') {
+  // Authentication callbacks, password resets, and public share links must be
+  // accessible without an account.
+  if (pathname === '/auth/callback' || pathname === '/reset-password' || pathname.startsWith('/share/')) {
     return <>{children}</>;
   }
 

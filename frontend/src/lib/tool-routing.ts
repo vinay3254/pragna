@@ -31,12 +31,13 @@ const ROLE_HOLDER =
   /\b(who (is|are|was)|who's)\b.*\b(ceo|cto|cm|chief minister|prime minister|pm|president|governor|minister|captain|coach|chairman|founder|head)\b|\b(ceo|cm|chief minister|prime minister|president|governor|captain|coach)\s+of\b/i;
 
 const EXPLICIT_SEARCH =
-  /\b(search( for| the web| online)?|google( it| for)?|look ?up|find (out|online|info)|browse|check online|on the (web|internet))\b/i;
+  /\b(search( for| the web| online)?|google( it| for)?|look ?up|lookup|research|verify (online|on the web)|find (out|online|info)|browse|check online|on the (web|internet))\b/i;
 
 /** True when a live web search should run before the model answers. */
 export function needsLiveSearch(text: string): boolean {
   const msg = (text || '').trim();
   if (!msg || msg.length < 3) return false;
+  if (/\b(search|find|look up)\s+(my|our|this)\s+(chats?|history|memories|files?)\b/i.test(msg)) return false;
 
   if (URL.test(msg) || EXPLICIT_SEARCH.test(msg)) return true;
 
@@ -44,10 +45,11 @@ export function needsLiveSearch(text: string): boolean {
   if (IMAGE_REQUEST.test(msg)) return false;
   if (DATE_TIME_QUESTION.test(msg)) return false; // answered from the live clock in the system prompt
   if (ARITHMETIC.test(msg)) return false;
+  if (FRESHNESS_CUES.test(msg) || ROLE_HOLDER.test(msg)) return true;
   if (CREATIVE_OR_TRANSFORM.test(msg)) return false;
   if (GENERIC_CODING.test(msg) && !FRESHNESS_CUES.test(msg)) return false;
 
-  return FRESHNESS_CUES.test(msg) || ROLE_HOLDER.test(msg);
+  return false;
 }
 
 // Messages that can only be satisfied by really calling a tool.
@@ -76,8 +78,11 @@ const TOOL_INTENTS: RegExp[] = [
 ];
 
 /** True when the tool schema should be sent to the model for this message. */
-export function needsTools(text: string): boolean {
+export function needsTools(text: string, searchCompleted = false): boolean {
   const msg = (text || '').trim();
   if (!msg || GREETING.test(msg) || ARITHMETIC.test(msg)) return false;
-  return TOOL_INTENTS.some((re) => re.test(msg));
+  return TOOL_INTENTS.some((re) => {
+    if (searchCompleted && [EXPLICIT_SEARCH, FRESHNESS_CUES, ROLE_HOLDER].includes(re)) return false;
+    return re.test(msg);
+  });
 }

@@ -121,6 +121,16 @@ export const SANSKRIT_MODELS: SanskritModelConfig[] = [
   },
 ];
 
+/** Hide the old six-option menu without suppressing other model lists. */
+export function isLegacyModelMenu(identifiers: string[]): boolean {
+  return identifiers.length > 0 && identifiers.every((identifier) =>
+    SANSKRIT_MODELS.some((model) =>
+      [model.id, model.displayName, model.asciiFallback, model.rawName]
+        .some((value) => value.toLowerCase() === identifier.trim().toLowerCase())
+    )
+  );
+}
+
 /**
  * Normalizes an arbitrary model string (ID, display name, ASCII fallback, or raw name)
  * to its SanskritModelConfig object.

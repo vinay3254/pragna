@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import {
+  ArrowLeft,
   ArrowRight,
   Check,
   FolderOpen,
@@ -364,7 +365,7 @@ export default function DesignHomePage() {
         </div>
       </aside>
       <main className="min-w-0 flex-1 overflow-y-auto">
-        <header className="flex h-16 items-center gap-2 px-6 sm:px-10">
+        <header className="flex min-h-16 flex-wrap items-center gap-2 px-4 py-3 sm:px-10">
           <div className="flex items-center lg:hidden">
             <DesignBrand size={22} />
           </div>
@@ -374,9 +375,10 @@ export default function DesignHomePage() {
           <div className="ml-auto flex items-center gap-2">
             <Link
               href="/"
-              className="rounded-lg px-3 py-2 text-xs text-muted-foreground hover:bg-muted lg:hidden"
+              className="inline-flex min-h-10 shrink-0 items-center gap-2 rounded-lg border border-border bg-card px-3 text-sm font-medium text-foreground transition-colors hover:bg-muted"
             >
-              Back to Pragna
+              <ArrowLeft size={16} aria-hidden="true" />
+              Back to chat
             </Link>
             <AppearanceButton />
           </div>

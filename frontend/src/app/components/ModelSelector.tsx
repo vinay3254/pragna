@@ -3,7 +3,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ChevronDown, Check, Zap, Brain, Gauge, Sparkles, Cpu } from 'lucide-react';
 import { ModelOption } from '../types/chat';
-import { getModelConfig } from '@/lib/modelDisplayNames';
+import { getModelConfig, isLegacyModelMenu } from '@/lib/modelDisplayNames';
 
 interface ModelSelectorProps {
   selectedModel: ModelOption;
@@ -38,6 +38,8 @@ export default function ModelSelector({
   }, []);
 
   const currentConfig = getModelConfig(selectedModel.id) || getModelConfig(selectedModel.label);
+
+  if (isLegacyModelMenu(models.map((model) => model.id))) return null;
 
   return (
     <div ref={containerRef} className="relative">

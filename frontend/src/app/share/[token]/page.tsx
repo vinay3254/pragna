@@ -9,6 +9,8 @@ import MarkdownRenderer from '@/app/components/MarkdownRenderer';
 interface SharedMessage {
   role: 'user' | 'assistant';
   content: string;
+  images?: string[];
+  files?: string[];
 }
 
 export default function SharedConversationPage() {
@@ -77,6 +79,13 @@ export default function SharedConversationPage() {
           <div key={i} className={m.role === 'user' ? 'flex justify-end' : ''}>
             {m.role === 'user' ? (
               <div className="max-w-[85%] px-4 py-2.5 rounded-2xl bg-muted/60 border border-border/50 text-sm leading-relaxed">
+                {m.images?.length ? <div className="flex flex-wrap gap-2 mb-2">
+                  {m.images.map((src, index) => (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img key={index} src={src} alt={`Attached photo ${index + 1}`} className="max-w-[200px] max-h-[200px] rounded-lg object-cover border border-border/50" />
+                  ))}
+                </div> : null}
+                {m.files?.map((name, index) => <p key={index} className="mb-2 text-xs text-muted-foreground">Attachment: {name}</p>)}
                 <p className="whitespace-pre-wrap">{m.content}</p>
               </div>
             ) : (
