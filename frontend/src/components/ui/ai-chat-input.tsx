@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useRef, useState, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
-import { getModelConfig, SANSKRIT_MODELS } from "@/lib/modelDisplayNames";
+import { getModelConfig, isLegacyModelMenu, SANSKRIT_MODELS } from "@/lib/modelDisplayNames";
 import LanguageSelector from "@/app/components/LanguageSelector";
 
 // ----------------------------------------------------------------------
@@ -200,19 +200,6 @@ function DocFileIcon() {
   );
 }
 
-function DynamicBarsIcon({ level }: { level: string }) {
-  const isMediumOrHigh = level === "Medium" || level === "Max Effort";
-  const isHigh = level === "Max Effort";
-
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-      <rect x="1.5" y="8" width="2.5" height="4.5" rx="1" fill="currentColor" className="transition-opacity duration-300" opacity={1} />
-      <rect x="5.75" y="5" width="2.5" height="7.5" rx="1" fill="currentColor" className="transition-opacity duration-300" opacity={isMediumOrHigh ? 1 : 0.3} />
-      <rect x="10" y="2" width="2.5" height="10.5" rx="1" fill="currentColor" className="transition-opacity duration-300" opacity={isHigh ? 1 : 0.3} />
-    </svg>
-  );
-}
-
 // ----------------------------------------------------------------------
 // Attachment Thumbnail
 // ----------------------------------------------------------------------
@@ -387,12 +374,11 @@ function AttachmentGalleryModal({
 export interface PromptInputProps {
   onSubmit?: (
     value: string,
-    meta: { model: string; effort: string; attachments: File[]; language?: string }
+    meta: { model: string; attachments: File[]; language?: string }
   ) => void;
   placeholder?: string;
   className?: string;
   models?: string[];
-  efforts?: string[];
   defaultValue?: string;
   value?: string;
   onChange?: (value: string) => void;
@@ -414,7 +400,6 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       placeholder = "Ask PRAGNA 1-A anything...",
       className,
       models = SANSKRIT_MODELS.map((m) => m.displayName),
-      efforts = ["Low", "Medium", "Max Effort"],
       defaultValue = "",
       value: controlledValue,
       onChange,
@@ -441,8 +426,8 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       }
       return models[0] || "Tvarā";
     });
-    const [effortIndex, setEffortIndex] = useState(1);
     const [isModelSelectOpen, setIsModelSelectOpen] = useState(false);
+    const showModelSelector = !isLegacyModelMenu(models);
     const [currentLanguage, setCurrentLanguage] = useState(selectedLanguage || "en");
 
     useEffect(() => {
@@ -473,7 +458,18 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
     };
 
     const [attachments, setAttachments] = useState<Attachment[]>([]);
+    const attachmentsRef = useRef<Attachment[]>([]);
     const [activeAttachment, setActiveAttachment] = useState<{ attachment: Attachment; rect: DOMRect } | null>(null);
+
+    useEffect(() => () => {
+      attachmentsRef.current.forEach((attachment) => URL.revokeObjectURL(attachment.url));
+      attachmentsRef.current = [];
+    }, []);
+
+    const updateAttachments = (next: Attachment[]) => {
+      attachmentsRef.current = next;
+      setAttachments(next);
+    };
 
     // Audio/Voice recording states
     const [isRecording, setIsRecording] = useState(false);
@@ -765,24 +761,19 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
     };
 
     const handleSubmit = () => {
+      if (isStreaming || isRecording) return;
       if (value.trim() === "" && !hasAttachments) return;
       setIsSmoothResize(false);
       onSubmit?.(value, {
         model: selectedModel,
-        effort: efforts[effortIndex],
         attachments: attachments.map((a) => a.file),
         language: currentLanguage,
       });
       handleValueChange("");
       attachments.forEach((a) => URL.revokeObjectURL(a.url));
-      setAttachments([]);
+      updateAttachments([]);
       setExpanded(false);
       setIsModelSelectOpen(false);
-    };
-
-    const cycleEffort = (e: React.MouseEvent) => {
-      e.stopPropagation();
-      setEffortIndex((prev) => (prev + 1) % efforts.length);
     };
 
     const openFileChooser = (e: React.MouseEvent) => {
@@ -792,46 +783,80 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
 
     const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB
 
-    const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const allFiles = Array.from(e.target.files ?? []);
-      e.target.value = "";
-
+    const attachFiles = (allFiles: File[]) => {
       const oversized = allFiles.filter((f) => f.size > MAX_ATTACHMENT_BYTES);
       const files = allFiles.filter((f) => f.size <= MAX_ATTACHMENT_BYTES);
       oversized.forEach((f) => console.warn(`"${f.name}" is too large (max 20MB) and was skipped.`));
 
       if (files.length === 0) return;
-      const room = Math.max(0, maxAttachments - attachments.length);
+      const room = Math.max(0, maxAttachments - attachmentsRef.current.length);
       const accepted = files.slice(0, room);
+      if (accepted.length === 0) return;
 
       if (!expanded) { setIsSmoothResize(false); setExpanded(true); }
       else { setIsSmoothResize(true); }
 
       for (const file of accepted) {
         const url = URL.createObjectURL(file);
-        if (file.type.startsWith("image/")) {
+        const isImage = file.type.startsWith("image/");
+        const id = `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`;
+        // Reserve the slot immediately, including when image decoding is still pending.
+        updateAttachments([...attachmentsRef.current, {
+          id, file, url, name: file.name, isImage,
+          ...(isImage ? { width: 800, height: 600 } : {}),
+        }]);
+        if (isImage) {
           const img = new Image();
-          img.onload = () => addAttachment(file, url, true, img.naturalWidth, img.naturalHeight);
-          img.onerror = () => addAttachment(file, url, true, 800, 600);
+          img.onload = () => {
+            // Decoding must not restore an image that was removed or already sent.
+            if (!attachmentsRef.current.some((attachment) => attachment.id === id)) return;
+            updateAttachments(attachmentsRef.current.map((attachment) => attachment.id === id
+              ? { ...attachment, width: img.naturalWidth, height: img.naturalHeight }
+              : attachment));
+          };
           img.src = url;
-        } else {
-          addAttachment(file, url, false);
         }
       }
     };
 
-    const addAttachment = (file: File, url: string, isImage: boolean, width?: number, height?: number) => {
-      const id = `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`;
-      setAttachments((prev) => [...prev, { id, file, url, name: file.name, width, height, isImage }]);
+    const handleFilesChosen = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(e.target.files ?? []);
+      e.target.value = "";
+      attachFiles(files);
+    };
+
+    const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+      if (isRecording) return;
+      const itemImages = Array.from(e.clipboardData.items ?? [])
+        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => file !== null);
+      const images = itemImages.length > 0 ? itemImages : Array.from(e.clipboardData.files ?? [])
+        .filter((file) => file.type.startsWith("image/"));
+      if (images.length === 0) return;
+
+      e.preventDefault();
+      attachFiles(images);
+
+      // Preserve accompanying text, including the current cursor selection.
+      const text = e.clipboardData.getData("text/plain");
+      if (text) {
+        const textarea = textareaRef.current;
+        const start = textarea?.selectionStart ?? value.length;
+        const end = textarea?.selectionEnd ?? start;
+        handleValueChange(value.slice(0, start) + text + value.slice(end));
+        requestAnimationFrame(() => {
+          textarea?.focus();
+          textarea?.setSelectionRange(start + text.length, start + text.length);
+        });
+      }
     };
 
     const removeAttachment = (id: string) => {
       setIsSmoothResize(true);
-      setAttachments((prev) => {
-        const target = prev.find((a) => a.id === id);
-        if (target) URL.revokeObjectURL(target.url);
-        return prev.filter((a) => a.id !== id);
-      });
+      const target = attachmentsRef.current.find((a) => a.id === id);
+      if (target) URL.revokeObjectURL(target.url);
+      updateAttachments(attachmentsRef.current.filter((a) => a.id !== id));
       thumbRefs.current.delete(id);
     };
 
@@ -864,6 +889,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
             internalContainerRef.current = node;
           }}
           onBlur={handleBlur}
+          onPaste={handlePaste}
           className={cn("relative flex flex-col w-full mx-auto", className)}
           style={{
             maxWidth: expanded
@@ -1018,6 +1044,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                 expanded && !isRecording ? "opacity-100 blur-0 translate-y-0 pointer-events-auto" : "opacity-0 blur-sm translate-y-2 pointer-events-none"
               )}
             >
+              {showModelSelector && (
               <div className="relative">
                 {(() => {
                   const currentConfig = getModelConfig(selectedModel);
@@ -1100,14 +1127,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                   </div>
                 </div>
               </div>
-
-              <button
-                type="button" onMouseDown={(e) => e.preventDefault()} onClick={cycleEffort}
-                className="group flex items-center gap-1.5 rounded-full px-2.5 py-1 text-foreground/70 transition-all duration-200 hover:bg-primary/15 hover:text-primary outline-none cursor-default border border-transparent hover:border-primary/30"
-              >
-                <DynamicBarsIcon level={efforts[effortIndex]} />
-                <span className="text-xs font-semibold select-none transition-colors"><MorphingText text={efforts[effortIndex]} /></span>
-              </button>
+              )}
 
               {/* Language Selector Pill */}
               <LanguageSelector

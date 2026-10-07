@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import time
 from datetime import datetime, timezone
@@ -7,7 +8,7 @@ import httpx
 from app import repository, trajectory_service
 from app.ollama_client import chat_stream_events
 from app.rag import retrieve
-from app.memory_service import retrieve_memories, extract_and_save_memory
+from app.memory_service import retrieve_memories, prepare_memories, MEMORY_DIRECTIVE
 from app.artifact_service import extract_and_save_artifacts
 from app.tools import OLLAMA_TOOLS_SCHEMA, MUTATING_TOOLS, execute_tool
 from app.languages import MULTILINGUAL_INSTRUCTION, get_language_directive, INDIAN_LANGUAGES
@@ -295,7 +296,7 @@ async def _build_ollama_messages(
         memories_collection,
         settings.embed_model,
         settings.ollama_url,
-        top_k=20,
+        top_k=100,
         threshold=threshold,
         conn=conn,
         user_id=user_id,
@@ -489,7 +490,7 @@ async def _run_generation_loop(
                     _url = _r.get("url", _r.get("href", ""))
                     _ctx += f"{_i}. **{_title}**\n   {_snippet}\n   Source: {_url}\n\n"
                 _ctx += f"Instructions: Answer the question using the fresh search context above where relevant: {query_text}"
-                
+
                 ollama_messages = list(ollama_messages)
                 for _idx in range(len(ollama_messages) - 1, -1, -1):
                     if ollama_messages[_idx].get("role") == "user":
@@ -615,14 +616,6 @@ async def _run_generation_loop(
         # Parse & persist artifacts
         extract_and_save_artifacts(conn, mid, full_response)
 
-        # Extract & persist memory in background
-        asyncio.create_task(
-            extract_and_save_memory(
-                conn, memories_collection, settings, conversation_id, query_text, full_response,
-                user_id=user_id,
-            )
-        )
-
         yield {
             "type": "done",
             "conversation_id": conversation_id,
@@ -679,12 +672,21 @@ async def generate_reply(
     trigger_message = repository.get_message(conn, parent_id)
     query_text = trigger_message["content"] if trigger_message else ""
 
+    memory_context = await prepare_memories(
+        conn, settings, user_id, repository.get_path_to_root(conn, parent_id), conversation_id
+    )
+
     ollama_messages, sources = await _build_ollama_messages(
         conn, collection, settings, memories_collection, query_text, parent_id,
         document_ids=document_ids,
         user_id=user_id,
         preferred_language=preferred_language,
         model=model,
+    )
+
+    ollama_messages[0]["content"] += "\n\n" + MEMORY_DIRECTIVE
+    ollama_messages[0]["content"] += "\nMemory write status: " + (
+        memory_context["error"] or ("Successfully saved: " + json.dumps(memory_context["saved"]))
     )
 
     # `async for` over a delegate generator doesn't forward athrow/aclose the

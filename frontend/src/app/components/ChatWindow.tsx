@@ -21,6 +21,7 @@ interface ChatWindowProps {
   models: ModelOption[];
   onSelectModel: (model: ModelOption) => void;
   onSendMessage: (content: string, images?: string[], sources?: Source[], language?: string, modelOverride?: string) => void;
+  onEditMessage: (messageId: string, content: string) => void;
   onStopStreaming: () => void;
   onNewConversation: () => void;
   onToggleSidebar: () => void;
@@ -43,6 +44,7 @@ export default function ChatWindow({
   models,
   onSelectModel,
   onSendMessage,
+  onEditMessage,
   onStopStreaming,
   onNewConversation,
   onToggleSidebar,
@@ -238,6 +240,7 @@ export default function ChatWindow({
             isStreaming={isStreaming}
             selectedLanguage={selectedLanguage}
             onOpenArtifact={onOpenArtifact}
+            onEditMessage={onEditMessage}
           />
         ) : (
           <EmptyState

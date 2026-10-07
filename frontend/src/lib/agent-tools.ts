@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { callMcpTool, isMcpToolName } from './mcpClient';
+import { searchWeb } from './web-search';
 
 const execAsync = promisify(exec);
 
@@ -1331,282 +1332,10 @@ export const AGENT_TOOLS_SCHEMA = [
 // Tool Implementation Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-function cleanDdgUrl(rawUrl: string): string {
-  if (!rawUrl) return '';
-  if (rawUrl.includes('uddg=')) {
-    try {
-      const u = new URL(rawUrl.startsWith('//') ? 'https:' + rawUrl : rawUrl);
-      const uddg = u.searchParams.get('uddg');
-      if (uddg) return decodeURIComponent(uddg);
-    } catch {}
-  }
-  if (rawUrl.startsWith('//')) return 'https:' + rawUrl;
-  return rawUrl;
-}
-
-/**
- * Live Web Search with robust multi-tiered fallback architecture
- */
-async function performWebSearch(rawQuery: string): Promise<any> {
-  const query = rawQuery.trim();
-  if (!query) {
-    return {
-      success: false,
-      query,
-      provider: 'none',
-      count: 0,
-      results: [],
-      error: 'Empty search query',
-      summary: 'No search query provided.',
-    };
-  }
-
-  // 1. Try backend high-fidelity search
-  try {
-    const backendRes = await fetch(`${BACKEND_URL}/api/tools/search`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(7000),
-    });
-    if (backendRes.ok) {
-      const data = await backendRes.json();
-      if (
-        data.success &&
-        data.provider !== 'placeholder' &&
-        Array.isArray(data.results) &&
-        data.results.length > 0 &&
-        !data.results.every((r: any) => !r.snippet || r.snippet.startsWith("Results for '") || r.snippet.startsWith("Search completed for"))
-      ) {
-        return {
-          success: true,
-          query,
-          provider: data.provider || 'backend',
-          count: data.results.length,
-          results: data.results,
-          summary: `Found ${data.results.length} live search results for "${query}"`,
-        };
-      }
-    }
-  } catch {}
-
-  const browserHeaders = {
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-  };
-
-  // 2. Fallback to DuckDuckGo Lite search
-  try {
-    const res = await fetch('https://lite.duckduckgo.com/lite/', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        ...browserHeaders,
-        Referer: 'https://lite.duckduckgo.com/',
-      },
-      body: `q=${encodeURIComponent(query)}`,
-      signal: AbortSignal.timeout(8000),
-    });
-
-    if (res.ok) {
-      const html = await res.text();
-      const linkRegex = /<a[^>]+class="result-link"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-      const snippetRegex = /<td[^>]+class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
-      const links: { title: string; url: string }[] = [];
-      let m;
-      while ((m = linkRegex.exec(html)) !== null && links.length < 8) {
-        links.push({
-          url: cleanDdgUrl(m[1]),
-          title: m[2].replace(/<[^>]+>/g, '').trim(),
-        });
-      }
-      const snippets: string[] = [];
-      while ((m = snippetRegex.exec(html)) !== null && snippets.length < 8) {
-        snippets.push(m[1].replace(/<[^>]+>/g, '').trim());
-      }
-
-      const results = links
-        .map((l, idx) => ({ ...l, snippet: snippets[idx] || '' }))
-        .filter((r) => r.title && (r.url || r.snippet));
-
-      if (results.length > 0) {
-        return {
-          success: true,
-          query,
-          provider: 'duckduckgo-lite',
-          count: results.length,
-          results,
-          summary: `Found ${results.length} live search results for "${query}"`,
-        };
-      }
-    }
-  } catch (err: any) {
-    console.warn('DuckDuckGo Lite search error:', err);
-  }
-
-  // 3. Fallback to DuckDuckGo HTML search
-  try {
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const res = await fetch(url, {
-      headers: browserHeaders,
-      signal: AbortSignal.timeout(8000),
-    });
-
-    if (res.ok) {
-      const html = await res.text();
-      const results: { title: string; snippet: string; url: string }[] = [];
-      const bodyRegex = /<div class="result__body"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/g;
-      let match;
-
-      while ((match = bodyRegex.exec(html)) !== null && results.length < 8) {
-        const block = match[1];
-        const titleMatch = /<a class="result__snippet[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
-        const urlMatch = /<a class="result__url"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
-
-        const cleanSnippet = titleMatch ? titleMatch[2].replace(/<[^>]+>/g, '').trim() : '';
-        const cleanUrl = urlMatch ? urlMatch[1].replace(/<[^>]+>/g, '').trim() : '';
-        const cleanTitle = urlMatch ? urlMatch[2].replace(/<[^>]+>/g, '').trim() : 'Search Result';
-
-        if (cleanSnippet || cleanTitle) {
-          results.push({
-            title: cleanTitle,
-            snippet: cleanSnippet,
-            url: cleanDdgUrl(cleanUrl),
-          });
-        }
-      }
-
-      if (results.length > 0) {
-        return {
-          success: true,
-          query,
-          provider: 'duckduckgo-html',
-          count: results.length,
-          results,
-          summary: `Found ${results.length} live search results for "${query}"`,
-        };
-      }
-    }
-  } catch (err: any) {
-    console.warn('DuckDuckGo HTML search error:', err);
-  }
-
-  // 4. Fallback to Wikipedia Real-time Search & Summary API
-  try {
-    const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&utf8=&format=json`;
-    const res = await fetch(wikiUrl, {
-      headers: { 'User-Agent': 'PragnaAI/1.0 (contact@pragna.ai)' },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      const hits = data?.query?.search || [];
-      const results: { title: string; snippet: string; url: string }[] = [];
-
-      for (const h of hits.slice(0, 5)) {
-        const title = h.title;
-        let snippet = h.snippet ? h.snippet.replace(/<[^>]+>/g, '').trim() : '';
-        let pageUrl = `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}`;
-
-        if (results.length < 2) {
-          try {
-            const sumRes = await fetch(
-              `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`,
-              {
-                headers: { 'User-Agent': 'PragnaAI/1.0 (contact@pragna.ai)' },
-                signal: AbortSignal.timeout(3500),
-              }
-            );
-            if (sumRes.ok) {
-              const sumData = await sumRes.json();
-              if (sumData.extract) snippet = sumData.extract;
-              if (sumData.content_urls?.desktop?.page) pageUrl = sumData.content_urls.desktop.page;
-            }
-          } catch {}
-        }
-
-        if (title && snippet) {
-          results.push({ title, snippet, url: pageUrl });
-        }
-      }
-
-      if (results.length > 0) {
-        return {
-          success: true,
-          query,
-          provider: 'wikipedia',
-          count: results.length,
-          results,
-          summary: `Found ${results.length} live search results for "${query}"`,
-        };
-      }
-    }
-  } catch (err: any) {
-    console.warn('Wikipedia search error:', err);
-  }
-
-  // 5. Fallback to DuckDuckGo Instant Answer API
-  try {
-    const res = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1`, {
-      headers: browserHeaders,
-      signal: AbortSignal.timeout(6000),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      const results: { title: string; snippet: string; url: string }[] = [];
-      const abstract = data?.AbstractText?.trim();
-      const abstractUrl = data?.AbstractURL?.trim();
-      const heading = data?.Heading?.trim();
-
-      if (abstract) {
-        results.push({
-          title: heading || `Overview for ${query}`,
-          url: abstractUrl || `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
-          snippet: abstract,
-        });
-      }
-
-      for (const topic of data?.RelatedTopics || []) {
-        if (topic && typeof topic === 'object' && topic.Text && results.length < 5) {
-          results.push({
-            title: topic.Text.slice(0, 60),
-            url: topic.FirstURL || `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
-            snippet: topic.Text,
-          });
-        }
-      }
-
-      if (results.length > 0) {
-        return {
-          success: true,
-          query,
-          provider: 'duckduckgo-instant',
-          count: results.length,
-          results,
-          summary: `Found ${results.length} live search results for "${query}"`,
-        };
-      }
-    }
-  } catch (err: any) {
-    console.warn('DuckDuckGo Instant Answer error:', err);
-  }
-
-  return {
-    success: true,
-    query,
-    provider: 'fallback',
-    count: 1,
-    results: [
-      {
-        title: `Search for "${query}"`,
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
-        snippet: `Web search results for "${query}".`,
-      },
-    ],
-    summary: `Search completed for "${query}".`,
-  };
+async function performWebSearch(query: string): Promise<any> {
+  const result = await searchWeb(query);
+  return { ...result, count: result.results.length, summary: result.success
+    ? `Found ${result.results.length} web search results.` : result.error };
 }
 
 /**
@@ -2776,7 +2505,7 @@ async function saveGeneratedImage(bytes: Buffer): Promise<string> {
 
 /**
  * Transform an existing picture with a text instruction (image-to-image).
- * Tries OmniRoute's /v1/images/edits (Codex) first, then Gemini's own API, then Stability AI.
+ * Tries OmniRoute's /v1/images/edits (Codex) first, then Gemini via OmniRoute, then Gemini's own API, then Stability AI.
  * `similarity` (0–1) is only used by Stability: higher stays closer to the original.
  */
 export async function imageToImage(opts: {
@@ -2852,12 +2581,30 @@ export async function imageToImage(opts: {
     }
   }
 
-  // 2. Gemini (Google API). Needs a key whose project has image quota.
+  // 2. Gemini through OmniRoute's Antigravity route, which passes `image` on to the model.
+  if (omniKey && Date.now() >= geminiQuotaBlockedUntil) {
+    try {
+      const res = await fetch(`${omniUrl}/v1/images/generations`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${omniKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'antigravity/gemini-3.1-flash-image', prompt, image: source.toString('base64') }),
+        signal: AbortSignal.timeout(120000),
+      });
+      const b64 = res.ok ? (await res.json())?.data?.[0]?.b64_json : null;
+      if (b64) return done(await saveGeneratedImage(Buffer.from(b64, 'base64')), 'antigravity/gemini-3.1-flash-image');
+      if (res.status === 429) geminiQuotaBlockedUntil = Date.now() + 15 * 60 * 1000;
+      failures.push(`antigravity: ${res.ok ? 'no image in reply' : `HTTP ${res.status}`}`);
+    } catch (err: any) {
+      failures.push(`antigravity: ${err?.message || 'request failed'}`);
+    }
+  }
+
+  // 3. Gemini (Google API). Needs a key whose project has image quota.
   const gemini = await geminiDirectImage({ prompt, image: { bytes: source, mime } });
   if (gemini.ok) return done(await saveGeneratedImage(gemini.bytes), gemini.model);
   failures.push(`gemini: ${gemini.error}`);
 
-  // 3. Stability AI image-to-image.
+  // 4. Stability AI image-to-image.
   const stabilityKey = process.env.STABILITY_API_KEY || process.env.NEXT_PUBLIC_STABILITY_API_KEY;
   if (stabilityKey) {
     try {

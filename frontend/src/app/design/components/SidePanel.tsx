@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { Check, History as HistoryIcon, Loader2, Palette, RotateCcw, Type, X } from 'lucide-react';
 import { toast } from 'sonner';
+import ThemeColorField from './ThemeColorField';
 import {
   DesignScreen,
   DesignTheme,
@@ -161,6 +162,7 @@ function ThemeControls({
   busy: boolean;
   saving: boolean;
 }) {
+  const [editingColor, setEditingColor] = useState<keyof DesignTheme | null>(null);
   return (
     <div className="space-y-6">
       <div>
@@ -196,21 +198,15 @@ function ThemeControls({
       <fieldset disabled={busy} className="space-y-3 disabled:opacity-50">
         <legend className="mb-3 text-xs font-medium">Colors</legend>
         {THEME_COLORS.map(({ key, label }) => (
-          <label key={key} className="flex items-center justify-between gap-2 text-xs">
-            <span>{label}</span>
-            <span className="flex items-center gap-2">
-              <span className="font-mono text-[11px] text-muted-foreground">
-                {theme[key].toUpperCase()}
-              </span>
-              <input
-                type="color"
-                value={theme[key]}
-                onChange={(e) => onTheme({ ...theme, [key]: e.target.value })}
-                aria-label={`${label} color`}
-                className="size-8 cursor-pointer rounded-md border border-border bg-transparent p-0.5"
-              />
-            </span>
-          </label>
+          <ThemeColorField
+            key={key}
+            label={label}
+            value={theme[key]}
+            onChange={color => onTheme({ ...theme, [key]: color })}
+            open={editingColor === key}
+            onToggle={() => setEditingColor(current => current === key ? null : key)}
+            disabled={busy}
+          />
         ))}
       </fieldset>
       <fieldset disabled={busy} className="space-y-4 disabled:opacity-50">

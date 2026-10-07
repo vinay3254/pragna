@@ -31,6 +31,7 @@ export interface Conversation {
   createdAt: string;
   updatedAt: string;
   sources?: Source[];
+  historyRevision?: number; // Increases when an edit replaces the conversation's later turns.
 }
 
 export interface ConversationGroup {

@@ -242,11 +242,58 @@ async def generate_image(prompt: str, api_key: str = "", aspect_ratio: str = "1:
     }
 
 
+EDIT_MODEL = "antigravity/gemini-3.1-flash-image"
+
+
+async def _edit_via_omniroute(image_base64: str, prompt: str) -> dict[str, Any] | None:
+    """Image-to-image through Gemini: OmniRoute's /v1/images/generations passes `image` on to the model. None on failure."""
+    global _gemini_blocked_until
+    import time
+    omni_key = os.getenv("OMNIROUTE_API_KEY") or OMNIROUTE_API_KEY
+    if not omni_key or time.time() < _gemini_blocked_until:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{OMNIROUTE_BASE_URL}/v1/images/generations",
+                headers={"Authorization": f"Bearer {omni_key}", "Content-Type": "application/json"},
+                json={"model": EDIT_MODEL, "prompt": prompt, "image": image_base64},
+            )
+        if resp.status_code == 429:
+            _gemini_blocked_until = time.time() + 900
+            logger.warning("OmniRoute Gemini quota exhausted, skipping for 15m")
+            return None
+        if resp.status_code != 200:
+            logger.warning(f"OmniRoute edit failed ({resp.status_code}): {resp.text[:200]}")
+            return None
+        item = resp.json().get("data", [{}])[0]
+        img_b64 = item.get("b64_json", "")
+        if not img_b64:
+            return None
+        final_url = save_base64_image(img_b64)
+        return {
+            "success": True,
+            "prompt": prompt,
+            "summary": f"Edited the image: {prompt}\n\n![{prompt}]({final_url})",
+            "image_base64": img_b64,
+            "image_url": final_url,
+        }
+    except Exception as e:
+        logger.warning(f"OmniRoute edit exception ({e})")
+        return None
+
+
 async def edit_image(image_base64: str, prompt: str, api_key: str, strength: float = 0.35) -> dict[str, Any]:
-    if not api_key:
-        return {"success": False, "error": "No Stability AI API key configured (STABILITY_API_KEY)."}
     try:
         image_bytes = base64.b64decode(image_base64)
+    except Exception as e:
+        return {"success": False, "error": f"Source image is not valid base64: {e}"}
+    edited = await _edit_via_omniroute(image_base64, prompt)
+    if edited:
+        return edited
+    if not api_key:
+        return {"success": False, "error": "Image editing failed in OmniRoute and no Stability AI API key is configured (STABILITY_API_KEY)."}
+    try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{STABILITY_API_BASE}/generate/sd3",

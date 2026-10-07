@@ -10,6 +10,7 @@ interface MessageListProps {
   selectedLanguage?: string;
   onOpenArtifact?: (title: string, content: string, language?: string) => void;
   onRetryLast?: () => void;
+  onEditMessage?: (messageId: string, content: string) => void;
 }
 
 function getDateLabel(timestamp: string): string {
@@ -46,7 +47,7 @@ function getDayKey(timestamp: string): string {
   }
 }
 
-export default function MessageList({ messages, isStreaming, selectedLanguage, onOpenArtifact, onRetryLast }: MessageListProps) {
+export default function MessageList({ messages, isStreaming, selectedLanguage, onOpenArtifact, onRetryLast, onEditMessage }: MessageListProps) {
   const handleRetry = useCallback(() => {
     onRetryLast?.();
   }, [onRetryLast]);
@@ -69,6 +70,8 @@ export default function MessageList({ messages, isStreaming, selectedLanguage, o
             dateSeparatorLabel={dateSeparatorLabel}
             selectedLanguage={selectedLanguage}
             onOpenArtifact={onOpenArtifact}
+            onEdit={message.role === 'user' && onEditMessage ? content => onEditMessage(message.id, content) : undefined}
+            canEdit={!isStreaming}
             onRetry={index === messages.length - 1 && message.role === 'assistant' && (
               message.content.includes("Could not connect") ||
               message.content.includes("Error:") ||

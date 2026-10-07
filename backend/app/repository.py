@@ -169,7 +169,7 @@ def delete_conversation(conn, conversation_id: int) -> bool:
         (str(conversation_id),),
     )
     conn.execute(
-        "DELETE FROM memories WHERE source_conversation_id = ?",
+        "UPDATE memories SET source_conversation_id = NULL WHERE source_conversation_id = ?",
         (conversation_id,),
     )
     conn.execute(
@@ -372,7 +372,7 @@ def create_memory(
 
 def get_memory(conn, memory_id: int, user_id: int) -> dict | None:
     row = conn.execute(
-        "SELECT id, content, created_at, source_conversation_id FROM memories WHERE id = ? AND user_id = ?",
+        "SELECT id, content, memory_key, created_at, source_conversation_id FROM memories WHERE id = ? AND user_id = ?",
         (memory_id, user_id),
     ).fetchone()
     return dict(row) if row else None
@@ -380,7 +380,7 @@ def get_memory(conn, memory_id: int, user_id: int) -> dict | None:
 
 def list_memories(conn, user_id: int) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, content, created_at, source_conversation_id FROM memories "
+        "SELECT id, content, memory_key, created_at, source_conversation_id FROM memories "
         "WHERE user_id = ? ORDER BY created_at DESC, id DESC",
         (user_id,),
     ).fetchall()
