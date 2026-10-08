@@ -1942,6 +1942,7 @@ export async function executeTool(name: string, args: Record<string, any>, authT
               }
             } catch (err) {
               console.warn(`Model ${m} failed or timed out:`, err);
+              omniFailure = `${m} could not be reached at ${omniUrl} (${err instanceof Error ? err.message : String(err)})`;
             }
           }
         }
