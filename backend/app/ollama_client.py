@@ -47,8 +47,9 @@ def _normalize_url(url: str) -> str:
 
 
 def _is_openai_compat(url: str) -> bool:
-    """Detect if the URL is an OpenAI-compatible endpoint (Omniroute, etc.)."""
-    return "20128" in url or "omniroute" in url.lower() or "openrouter" in url.lower()
+    """Anything that is not Ollama itself (local :11434 or ollama.com) is an OpenAI-compatible gateway such as
+    OmniRoute, which can sit behind any hostname (a tunnel, a Render service)."""
+    return "11434" not in url and "ollama.com" not in url.lower()
 
 
 def _openai_to_ollama_messages(messages: list[dict]) -> list[dict]:
