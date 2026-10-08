@@ -34,9 +34,11 @@ async def test_execute_tool_web_search():
 
 async def test_execute_tool_generate_image_no_api_key(tmp_path, monkeypatch):
     monkeypatch.delenv("STABILITY_API_KEY", raising=False)
+    monkeypatch.delenv("OMNIROUTE_API_KEY", raising=False)
+    monkeypatch.setattr("app.image_service.OMNIROUTE_API_KEY", "")
     res = await execute_tool("generate_image", {"prompt": "a red fox"})
-    assert res["success"] is True
-    assert "pollinations" in res["image_url"]
+    assert res["success"] is False
+    assert "OmniRoute" in res["error"]
 
 
 
