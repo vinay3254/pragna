@@ -565,6 +565,60 @@ def get_shared_conversation(conn, token: str) -> dict | None:
     return dict(row) if row else None
 
 
+def sync_chats(conn, user_id: int, chats: list[dict], deleted_ids: list[str], since: str | None) -> dict:
+    """Store a client's changed chats and return what other devices changed since `since`.
+
+    The newest (historyRevision, updatedAt) wins per chat; a deletion is permanent so a stale
+    device cannot bring a deleted chat back.
+    """
+    synced_at = _now()
+    accepted: set[str] = set()
+    stored = {
+        row["chat_id"]: row
+        for row in conn.execute(
+            "SELECT chat_id, revision, updated_at, deleted FROM synced_chats WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    }
+    for chat_id in deleted_ids:
+        if chat_id in stored and stored[chat_id]["deleted"]:
+            continue
+        conn.execute(
+            "INSERT INTO synced_chats (user_id, chat_id, data, revision, updated_at, synced_at, deleted) "
+            "VALUES (?, ?, '', 0, ?, ?, 1) "
+            "ON CONFLICT (user_id, chat_id) DO UPDATE SET data = '', deleted = 1, synced_at = excluded.synced_at",
+            (user_id, chat_id, synced_at, synced_at),
+        )
+        accepted.add(chat_id)
+    for chat in chats:
+        chat_id = chat["id"]
+        revision = int(chat.get("historyRevision") or 0)
+        updated_at = str(chat.get("updatedAt") or "")
+        row = stored.get(chat_id)
+        if row and (row["deleted"] or (revision, updated_at) <= (row["revision"], row["updated_at"])):
+            continue
+        conn.execute(
+            "INSERT INTO synced_chats (user_id, chat_id, data, revision, updated_at, synced_at, deleted) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0) "
+            "ON CONFLICT (user_id, chat_id) DO UPDATE SET data = excluded.data, revision = excluded.revision, "
+            "updated_at = excluded.updated_at, synced_at = excluded.synced_at",
+            (user_id, chat_id, json.dumps(chat), revision, updated_at, synced_at),
+        )
+        accepted.add(chat_id)
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT chat_id, data, deleted, synced_at FROM synced_chats WHERE user_id = ? AND synced_at > ? "
+        "ORDER BY synced_at",
+        (user_id, since or ""),
+    ).fetchall()
+    remote = [row for row in rows if row["chat_id"] not in accepted]
+    return {
+        "chats": [json.loads(row["data"]) for row in remote if not row["deleted"]],
+        "deleted_ids": [row["chat_id"] for row in remote if row["deleted"]],
+        "cursor": rows[-1]["synced_at"] if rows else since,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Email OTP & Password Reset Helpers
 # ---------------------------------------------------------------------------

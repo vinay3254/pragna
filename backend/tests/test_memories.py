@@ -300,3 +300,27 @@ async def test_related_person_facts_do_not_overwrite_their_name(tmp_path):
     facts = await retrieve_memories('girlfriend', None, 'm', 'offline', conn=conn, user_id=1)
     assert "User's girlfriend is Reshma." in facts
     assert "User's girlfriend likes tea." in facts
+
+
+async def test_bare_reply_to_nickname_question_is_saved_and_recalled(tmp_path):
+    conn = make_conn(tmp_path)
+    with patch("app.memory_service.chat_stream") as model:
+        result = await prepare_memories(conn, FakeSettings(), 1, [
+            {"role": "user", "content": "do u know my nickname?"},
+            {"role": "assistant", "content": "I don't have a nickname on file for you."},
+            {"role": "user", "content": "its sigmaslayer"},
+        ])
+        assert result["saved"] == ["User's nickname is sigmaslayer."]
+        model.assert_not_called()
+    recalled = await prepare_memories(conn, FakeSettings(), 1, [{"role": "user", "content": "whats my nickname?"}])
+    assert "User's nickname is sigmaslayer." in recalled["memories"]
+
+
+async def test_bare_reply_without_nickname_question_is_not_saved(tmp_path):
+    conn = make_conn(tmp_path)
+    result = await prepare_memories(conn, FakeSettings(), 1, [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "Hello! How can I help?"},
+        {"role": "user", "content": "its sigmaslayer"},
+    ])
+    assert result["saved"] == []

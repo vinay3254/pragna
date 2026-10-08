@@ -10,7 +10,7 @@ import httpx
 logger = logging.getLogger("pragna.image")
 
 OMNIROUTE_BASE_URL = os.getenv("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128").rstrip("/")
-OMNIROUTE_API_KEY = os.getenv("OMNIROUTE_API_KEY", "sk-83ef8c640f53be5d-74e79d-e4fe3585")
+OMNIROUTE_API_KEY = os.getenv("OMNIROUTE_API_KEY", "")
 STABILITY_API_BASE = "https://api.stability.ai/v2beta/stable-image"
 MODEL = "sd3.5-large-turbo"
 

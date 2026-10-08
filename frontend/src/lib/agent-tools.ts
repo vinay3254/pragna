@@ -1856,7 +1856,7 @@ export async function executeTool(name: string, args: Record<string, any>, authT
           aspectRatio === '4:3' ? '640x512' :
           aspectRatio === '3:4' ? '512x640' : '512x512';
 
-        const omniKey = process.env.OMNIROUTE_API_KEY || 'sk-83ef8c640f53be5d-74e79d-e4fe3585';
+        const omniKey = process.env.OMNIROUTE_API_KEY || '';
         const omniUrl = (process.env.OMNIROUTE_BASE_URL || 'http://127.0.0.1:20128').replace(/\/+$/, '');
         const requestedModel = args.model;
         const modelsToTry: string[] = [];

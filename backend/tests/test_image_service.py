@@ -1,7 +1,16 @@
 import base64
 import httpx
 import respx
+import pytest
+from app import image_service
 from app.image_service import generate_image, edit_image
+
+
+@pytest.fixture(autouse=True)
+def no_omniroute(monkeypatch):
+    """Keep tests off the real OmniRoute gateway, whatever the developer's environment holds."""
+    monkeypatch.delenv("OMNIROUTE_API_KEY", raising=False)
+    monkeypatch.setattr(image_service, "OMNIROUTE_API_KEY", "")
 
 
 @respx.mock
@@ -19,8 +28,8 @@ async def test_generate_image_success():
 
 async def test_generate_image_no_api_key_returns_error_without_request():
     result = await generate_image("a red fox", api_key="")
-    assert result["success"] is True
-    assert "pollinations" in result["image_url"]
+    assert result["success"] is False
+    assert "OmniRoute" in result["error"]
 
 
 @respx.mock
@@ -31,8 +40,7 @@ async def test_generate_image_http_error():
 
     result = await generate_image("bad prompt", api_key="test-key")
 
-    assert result["success"] is True
-    assert "pollinations" in result["image_url"]
+    assert result["success"] is False
 
 
 

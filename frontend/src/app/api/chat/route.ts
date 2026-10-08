@@ -223,7 +223,7 @@ function buildMemoryPrompt(
     return '';
   };
   const userName = lookup(/User's name is\s+([^.]+)/i) || accountName || '';
-  const userNickname = nicknameOverride || lookup(/User's nickname is\s+([^.]+)/i);
+  const userNickname = lookup(/User's nickname is\s+([^.]+)/i) || nicknameOverride || '';
 
   // Drop superseded name facts so the prompt never states two different names.
   const facts = memories.filter((m) => {
@@ -262,9 +262,11 @@ function getOmnirouteKey(): string {
   return process.env.OMNIROUTE_API_KEY || '';
 }
 
+const OMNIROUTE_CHAT_MODEL = 'antigravity/gemini-3.7-flash-high';
+
 function mapOmnirouteModel(model: string): string {
   if (model?.startsWith('antigravity/')) return model;
-  return 'antigravity/gemini-2.5-flash';
+  return OMNIROUTE_CHAT_MODEL;
 }
 
 function getBackendOllamaKeys(): string[] {
@@ -281,15 +283,8 @@ function getBackendOllamaKeys(): string[] {
       }
     }
   } catch {}
-  const fallbackKeys = [
-    '26a95f0c5431431d8338645cdde4998f.CyDoeN4fDrSTJum8dpfRglps',
-    'edaff62e882644429122351eebfb886f.nWMqDHxFN_XoKqrj0OuSysKN',
-    '8236b13c2ce04b7ab1e0a47db95044ca.hr_X86hvlBtvKIajcuDKMa7i',
-    'e3a4223d79bb4987a04cc8c84ca13126.ZinzQDR_UwLbEOI3-d2EeT3w',
-    '656c9a178c5147cfbde8bea65bd2586c.362NxF3QYCi36-V3vH10tKUY'
-  ];
-  for (const k of fallbackKeys) {
-    if (!keys.includes(k)) keys.push(k);
+  for (const k of (process.env.OLLAMA_API_KEY || '').split(',').map((v) => v.trim())) {
+    if (k && !keys.includes(k)) keys.push(k);
   }
   return keys;
 }
@@ -555,7 +550,7 @@ export async function POST(req: NextRequest) {
     const modelConfig = getModelConfig(model) || getModelConfig(targetModel);
     const modelDisplayName = modelConfig?.displayName || (model.includes('/') ? model.split('/')[1] : model);
     const modelScript = modelConfig?.sanskritScript ? ` (${modelConfig.sanskritScript})` : '';
-    const modelRaw = targetModel; // the Ollama model actually serving this request
+    const modelRaw = getOmnirouteKey() && !hasImages ? mapOmnirouteModel(model) : targetModel; // the model actually serving this request
     const modelMeaning = modelConfig?.meaning ? ` — meaning "${modelConfig.meaning}"` : '';
     const modelDesc = modelConfig?.description ? ` (${modelConfig.description})` : '';
 
@@ -941,7 +936,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
           const omniKey = getOmnirouteKey();
           if (omniKey && !hasImages) {
             try {
-              const omniUrl = 'http://127.0.0.1:20128/v1/chat/completions';
+              const omniUrl = `${(process.env.OMNIROUTE_BASE_URL || 'http://127.0.0.1:20128').replace(/\/+$/, '')}/v1/chat/completions`;
               let omniModel = mapOmnirouteModel(model);
               for (let round = 0; round < MAX_ROUNDS; round++) {
                 // The last round runs without tools so the model has to write a final answer.
@@ -955,10 +950,10 @@ CRITICAL MANDATORY INSTRUCTIONS:
                       messages: toOpenAIMessages(conversationHistory),
                       ...(withTools ? { tools: fullToolsSchema, tool_choice: 'auto' } : {}),
                       temperature,
-                      max_tokens: 1500,
+                      max_tokens: 8192, // thinking tokens share this budget with the answer
                       stream: true,
                     }),
-                    signal: AbortSignal.timeout(25000),
+                    signal: AbortSignal.timeout(90000),
                   });
                 let res: Response | null = null;
                 try {

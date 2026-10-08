@@ -148,6 +148,22 @@ export function persistChatValue(key: string, value: string | null, deletedId?: 
   return write;
 }
 
+/** Ids of chats deleted on this device; they are synced so other devices drop them too. */
+export async function readDeletedChatIds(key: string): Promise<string[]> {
+  await pendingWrites.get(key)?.catch(() => {});
+  try {
+    const database = await openDatabase();
+    const record = await new Promise<StoredValue | undefined>((resolve, reject) => {
+      const request = database.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    return record?.deletedIds ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export async function readChatValue(key: string): Promise<string | null> {
   await pendingWrites.get(key)?.catch(() => {});
   try {

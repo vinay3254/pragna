@@ -13,6 +13,7 @@ def test_settings(tmp_path):
         chroma_path=str(tmp_path / "chroma"),
         documents_dir=str(tmp_path / "documents"),
         jwt_secret="test-secret-not-for-production",
+        frontend_public_url="",
     )
 
 

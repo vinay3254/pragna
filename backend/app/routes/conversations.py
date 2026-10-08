@@ -2,7 +2,7 @@ import json
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Request, HTTPException, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from app import repository
 from app.auth import get_optional_current_user, get_current_user
 
@@ -28,6 +28,18 @@ class ShareRequest(BaseModel):
 
 class ActiveLeafRequest(BaseModel):
     message_id: int
+
+
+class SyncChat(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str = Field(min_length=1, max_length=200)
+    updatedAt: str = ""
+
+
+class SyncRequest(BaseModel):
+    chats: list[SyncChat] = Field(default_factory=list, max_length=25)
+    deleted_ids: list[str] = Field(default_factory=list, max_length=5000)
+    since: Optional[str] = None
 
 
 @router.get("/api/conversations")
@@ -149,5 +161,7 @@ async def search_chats(
 
 
 @router.post("/api/chat/sync")
-async def sync_chats(request: Request, current_user: dict = Depends(get_current_user)):
-    return {"success": True, "synced": True}
+async def sync_chats(request: Request, body: SyncRequest, current_user: dict = Depends(get_current_user)):
+    return repository.sync_chats(
+        request.app.state.conn, current_user["id"], [chat.model_dump() for chat in body.chats], body.deleted_ids, body.since
+    )
