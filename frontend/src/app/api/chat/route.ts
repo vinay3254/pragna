@@ -979,7 +979,6 @@ CRITICAL MANDATORY INSTRUCTIONS:
                 const toolCalls = await streamWithTools(res);
                 if (!toolCalls || toolCalls.length === 0) {
                   streamedSuccess = true;
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ model: omniModel })}\n\n`));
                   console.log(`[Chat API] answered by OmniRoute (${omniModel})`);
                   generateMentionedDocument(assistantResponseText);
                   break;
@@ -1059,7 +1058,6 @@ CRITICAL MANDATORY INSTRUCTIONS:
             const { text, toolCalls } = await streamOllama(res);
             if (toolCalls.length === 0) {
               streamedSuccess = true;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ model: targetModel })}\n\n`));
               console.log(`[Chat API] answered by Ollama (${targetModel})`);
               generateMentionedDocument(text);
               break;

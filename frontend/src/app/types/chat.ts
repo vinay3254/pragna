@@ -7,7 +7,6 @@ export interface Message {
   images?: string[]; // base64 data URLs of attached photos
   files?: string[]; // filenames of documents attached with this message
   citations?: Citation[]; // RAG passages the reply drew on, keyed to inline [n] markers
-  model?: string; // the gateway model that wrote this reply
 }
 
 export interface Source {
