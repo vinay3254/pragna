@@ -1,0 +1,99 @@
+.design-studio {
+  --design-canvas: var(--background);
+  --design-sidebar: var(--sidebar-bg);
+  --design-selected: var(--sidebar-active);
+  height: 100dvh;
+  overflow: hidden;
+  color: var(--foreground);
+  background: var(--background);
+  font-size: 14px;
+}
+.design-studio :is(button, a, input, textarea, select):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+}
+.design-studio button:disabled {
+  cursor: not-allowed;
+}
+.design-studio ::selection {
+  background: var(--design-selected);
+  color: var(--foreground);
+}
+.design-heading {
+  font-family: var(--font-sans);
+  letter-spacing: -0.04em;
+  font-weight: 500;
+}
+:where(.design-icon-button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+.design-icon-button:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+.design-icon-button[aria-pressed='true'] {
+  color: var(--primary);
+  background: var(--design-selected);
+}
+.design-canvas {
+  background-color: var(--design-canvas);
+  background-image: radial-gradient(var(--border) 0.8px, transparent 0.8px);
+  background-size: 20px 20px;
+}
+.design-composer {
+  box-shadow: 0 2px 8px rgb(0 0 0 / 3%);
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+.design-composer:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 3px 14px rgb(0 0 0 / 5%);
+}
+.design-popover {
+  box-shadow: 0 8px 30px rgb(0 0 0 / 12%);
+}
+.design-project-card {
+  transition:
+    border-color 0.15s,
+    transform 0.15s;
+}
+.design-project-card:hover {
+  border-color: var(--primary);
+  transform: translateY(-2px);
+}
+.design-message {
+  animation: design-appear 0.2s ease-out;
+}
+@media (max-width: 767px) {
+  :where(.design-icon-button) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+@keyframes design-appear {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .design-studio *,
+  .design-studio *::before,
+  .design-studio *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

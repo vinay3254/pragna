@@ -208,7 +208,18 @@ async def export_document_endpoint(body: DocumentExportRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/api/documents/engine")
+async def document_engine_endpoint(payload: dict):
+    from app.document_generator import _handle_ipc
+    try:
+        res = _handle_ipc(payload)
+        return res
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @router.api_route("/api/documents/download/{filename}", methods=["GET", "HEAD"])
+@router.api_route("/generated_docs/{filename}", methods=["GET", "HEAD"])
 async def download_generated_document(filename: str):
     clean_name = Path(filename).name
     filepath = GENERATED_DOCS_DIR / clean_name

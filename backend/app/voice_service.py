@@ -6,7 +6,7 @@ import os
 from typing import AsyncGenerator, Dict, Any, List, Optional
 import edge_tts
 
-logger = logging.getLogger("mimir.voice")
+logger = logging.getLogger("pragna.voice")
 
 DEFAULT_VOICE = "en-US-AriaNeural"
 

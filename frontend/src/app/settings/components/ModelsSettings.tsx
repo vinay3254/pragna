@@ -66,13 +66,10 @@ const MODEL_TIERS: ModelTier[] = [
 
 export default function ModelsSettings() {
   const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-5');
-  const [customApiKey, setCustomApiKey] = useState('');
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [keySaved, setKeySaved] = useState(false);
   const [temperature, setTemperature] = useState('0.7');
   const [maxTokens, setMaxTokens] = useState('4000');
   const DEFAULT_PRAGNA_PROMPT =
-    'You are PRAGNA 1-A, an intelligent, articulate, and thoughtful AI assistant created by EtherX Innovations within the IgniteX team. PRAGNA 1-A operates across three distinct interfaces: PRAGNA 1-A Chatbot, PRAGNA 1-A Code, and Coword. Voice, Tone & Personality: Speak with intellectual vitality, warmth, curiosity, and sharpness as an expert thinking partner. When exploring interesting topics, concepts, or tools, open with an engaging conversational hook rather than flat dictionary preambles, and conclude multifaceted topics with an inviting follow-up. Formatting: Always format explanations and technical breakdowns using bold section headers (e.g. **What It Is:**, **How It Works:**, **Why It Matters:**) and bullet points with bold lead-in labels (e.g. • **Feature Name**: details). Never spit out dense unbroken walls of text. Be direct and concise for simple facts. Zero emojis under any circumstances.';
+    'You are PRAGNA 1-A, an intelligent, articulate, and thoughtful AI assistant created by EtherX Innovations within the IgniteX team. PRAGNA 1-A operates across three distinct interfaces: PRAGNA 1-A Chatbot, PRAGNA 1-A Code, and Coword. Voice, Tone & Personality: Speak with intellectual vitality, warmth, curiosity, and sharpness as an expert thinking partner. When exploring interesting topics, concepts, or tools, open with an engaging conversational hook rather than flat dictionary preambles, and conclude multifaceted topics with an inviting follow-up. Formatting: Always format explanations and technical breakdowns using bold section headers (e.g. **What It Is:**, **How It Works:**, **Why It Matters:**) and bullet points with bold lead-in labels (e.g. • **Feature Name**: details). Never spit out dense unbroken walls of text. Be direct and concise for simple facts. Greetings and small talk get 1-2 plain sentences with no headers, bullets, or self-introduction. Zero emojis under any circumstances.';
 
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_PRAGNA_PROMPT);
   const [promptSaving, setPromptSaving] = useState(false);
@@ -80,13 +77,11 @@ export default function ModelsSettings() {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const savedKey = localStorage.getItem('claudechat_custom_api_key') || '';
       const savedModel = localStorage.getItem('claudechat_selected_model') || 'claude-sonnet-4-5';
       const savedPrompt = localStorage.getItem('claudechat_system_prompt');
       const savedTemp = localStorage.getItem('claudechat_temperature') || '0.7';
       const savedTokens = localStorage.getItem('claudechat_max_tokens') || '4000';
 
-      setCustomApiKey(savedKey);
       setSelectedModel(savedModel);
       if (savedPrompt) {
         if (savedPrompt.includes('Claude') || savedPrompt.includes('Anthropic') || savedPrompt.includes('helpful AI assistant.')) {
@@ -100,15 +95,6 @@ export default function ModelsSettings() {
       setMaxTokens(savedTokens);
     }
   }, []);
-
-  const handleSaveApiKey = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('claudechat_custom_api_key', customApiKey.trim());
-      setKeySaved(true);
-      toast.success('API Key saved successfully');
-      setTimeout(() => setKeySaved(false), 2500);
-    }
-  };
 
   const handleSelectModel = (id: string) => {
     setSelectedModel(id);
@@ -151,21 +137,13 @@ export default function ModelsSettings() {
             </div>
             <div>
               <h3 className="text-sm font-semibold text-foreground">API Keys & Provider Status</h3>
-              <p className="text-xs text-muted-foreground">Pre-configured keys and custom key overrides</p>
+              <p className="text-xs text-muted-foreground">Provider status</p>
             </div>
           </div>
         </div>
 
         {/* Status badges */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
-          <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-muted/60 border border-border text-xs">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="font-medium text-foreground">OpenRouter</span>
-            </div>
-            <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-mono">Connected</span>
-          </div>
-
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
           <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-muted/60 border border-border text-xs">
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-emerald-500" />
@@ -183,40 +161,6 @@ export default function ModelsSettings() {
           </div>
         </div>
 
-        {/* Custom API Key input */}
-        <div className="space-y-1.5 pt-2 border-t border-border/60">
-          <label className="text-xs font-medium text-foreground flex items-center justify-between">
-            <span>Custom OpenRouter / Anthropic Key Override</span>
-            <span className="text-[11px] text-muted-foreground font-normal">Optional (defaults to environment key)</span>
-          </label>
-          <div className="flex gap-2">
-            <div className="relative flex-1 flex items-center">
-              <input
-                type={showApiKey ? 'text' : 'password'}
-                value={customApiKey}
-                onChange={(e) => setCustomApiKey(e.target.value)}
-                placeholder="sk-or-v1-..."
-                className="w-full bg-muted border border-border rounded-lg pl-3 pr-10 py-2 text-xs font-mono text-foreground outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40"
-              />
-              <button
-                type="button"
-                onClick={() => setShowApiKey((prev) => !prev)}
-                className="absolute right-2.5 p-1 text-gold-500 hover:text-gold-400 dark:text-gold-400 dark:hover:text-gold-300 transition-colors focus:outline-none rounded"
-                aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
-                title={showApiKey ? 'Hide API key' : 'Show API key'}
-              >
-                {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
-            </div>
-            <button
-              onClick={handleSaveApiKey}
-              className="px-3 py-2 bg-primary text-primary-foreground text-xs font-medium rounded-lg hover:opacity-90 active:scale-95 transition-all flex items-center gap-1.5 shrink-0"
-            >
-              {keySaved ? <Check size={12} /> : <Save size={12} />}
-              <span>{keySaved ? 'Saved' : 'Save Key'}</span>
-            </button>
-          </div>
-        </div>
       </div>
 
       {/* Available Models Grid */}

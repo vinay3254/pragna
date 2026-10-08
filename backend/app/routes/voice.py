@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from app import voice_service, chat_service, repository
 from app.auth import decode_access_token
 
-logger = logging.getLogger("mimir.routes.voice")
+logger = logging.getLogger("pragna.routes.voice")
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
 

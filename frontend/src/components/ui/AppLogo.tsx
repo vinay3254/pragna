@@ -1,81 +1,58 @@
 'use client';
 
-import React, { memo, useMemo } from 'react';
-import AppIcon from './AppIcon';
+import React, { memo } from 'react';
 
 interface AppLogoProps {
-  src?: string; // Image source (optional)
-  variant?: 'shield' | 'full' | 'wordmark' | 'icon'; // Pragna variant
-  iconName?: string; // Icon name when no image
-  size?: number; // Size for icon/image (height for full/wordmark, square dimension for shield/icon)
-  className?: string; // Additional classes
-  onClick?: () => void; // Click handler
+  src?: string;
+  variant?: 'shield' | 'full' | 'wordmark' | 'icon';
+  size?: number;
+  className?: string;
+  onClick?: () => void;
 }
 
 const AppLogo = memo(function AppLogo({
   src,
   variant = 'shield',
-  iconName = 'SparklesIcon',
   size = 40,
   className = '',
   onClick,
 }: AppLogoProps) {
-  // Determine source image based on variant or custom src
-  const imageSrc = useMemo(() => {
-    if (src) return src;
-    switch (variant) {
-      case 'full':
-        return '/pragna-logo-full.png';
-      case 'wordmark':
-        return '/pragna-wordmark.png';
-      case 'icon':
-        return '/pragna-logo-icon.png';
-      case 'shield':
-      default:
-        return '/pragna-shield-icon.png';
-    }
-  }, [src, variant]);
+  const imageSources = {
+    shield: '/pragna-shield-icon.png',
+    full: '/pragna-logo-full.png',
+    wordmark: '/pragna-wordmark.png',
+    icon: '/pragna-logo-icon.png',
+  };
+  const width = Math.round(size * (variant === 'full' ? 3.6 : variant === 'wordmark' ? 8.27 : 1));
+  const name = 'PRAGNA 1-A';
+  const content = (
+    <img
+      src={src || imageSources[variant]}
+      alt={name}
+      width={width}
+      height={size}
+      className="shrink-0 object-contain"
+      style={{ width, height: size }}
+      loading="eager"
+      decoding="async"
+    />
+  );
+  const classes = `inline-flex shrink-0 items-center justify-center select-none align-middle ${className}`;
 
-  // Memoize className calculation
-  const containerClassName = useMemo(() => {
-    const classes = ['inline-flex items-center justify-center select-none bg-transparent'];
-    if (onClick) classes.push('cursor-pointer hover:opacity-85 transition-opacity');
-    if (className) classes.push(className);
-    return classes.join(' ');
-  }, [onClick, className]);
-
-  // Aspect ratio calculation for horizontal variants
-  const { width, height } = useMemo(() => {
-    if (variant === 'full') {
-      // 320 x 89 ~ 3.595:1
-      return { width: Math.round(size * 3.6), height: size };
-    }
-    if (variant === 'wordmark') {
-      // 215 x 26 ~ 8.27:1
-      return { width: Math.round(size * 8.27), height: size };
-    }
-    return { width: size, height: size };
-  }, [variant, size]);
-
-  return (
-    <div className={containerClassName} onClick={onClick}>
-      {imageSrc ? (
-        <img
-          src={imageSrc}
-          alt="PRAGNA 1-A"
-          width={width}
-          height={height}
-          className="flex-shrink-0 object-contain bg-transparent select-none filter drop-shadow-[0_2px_12px_rgba(212,175,55,0.22)]"
-          style={{ width: `${width}px`, height: `${height}px` }}
-          loading="eager"
-          decoding="async"
-        />
-      ) : (
-        <AppIcon name={iconName} size={size} className="flex-shrink-0" />
-      )}
-    </div>
+  return onClick ? (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={name}
+      className={`${classes} rounded-md transition-opacity hover:opacity-80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring`}
+    >
+      {content}
+    </button>
+  ) : (
+    <span className={classes}>
+      {content}
+    </span>
   );
 });
 
 export default AppLogo;
-

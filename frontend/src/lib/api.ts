@@ -3,7 +3,7 @@ export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   '';
 
-const TOKEN_STORAGE_KEY = 'argus-auth-token';
+const TOKEN_STORAGE_KEY = 'pragna-auth-token';
 let authToken: string | null =
   typeof window !== 'undefined' ? localStorage.getItem(TOKEN_STORAGE_KEY) : null;
 
@@ -343,6 +343,7 @@ export interface AuthUser {
   email: string;
   name: string | null;
   avatar_url: string | null;
+  plan?: string | null;
 }
 
 export interface AuthResponse {
@@ -453,7 +454,9 @@ export async function login(email: string, password: string): Promise<AuthRespon
 
 export async function fetchMe(): Promise<AuthUser> {
   const response = await fetch(`${API_BASE}/api/auth/me`, { headers: _authHeaders() });
-  if (!response.ok) throw new Error('Not authenticated');
+  if (!response.ok) {
+    throw Object.assign(new Error('Not authenticated'), { status: response.status });
+  }
   return response.json();
 }
 
@@ -514,4 +517,65 @@ export function getVoiceWebSocketUrl(): string {
   const host = base.replace(/^https?:\/\//, '');
   return `${wsProto}//${host}/api/voice/ws`;
 }
+
+export interface BillingOrderResponse {
+  order_id: number;
+  amount: number;
+  currency: string;
+  provider: string;
+}
+
+export interface BillingConfirmResponse {
+  success: boolean;
+  plan: string;
+  current_period_end: string | null;
+}
+
+export interface BillingStatusResponse {
+  plan: string;
+  current_period_end: string | null;
+}
+
+export async function createBillingOrder(): Promise<BillingOrderResponse> {
+  const res = await fetch(`${API_BASE}/api/billing/create-order`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ..._authHeaders(),
+    },
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create billing order');
+  }
+  return res.json();
+}
+
+export async function confirmDemoPayment(orderId: number): Promise<BillingConfirmResponse> {
+  const res = await fetch(`${API_BASE}/api/billing/confirm-demo-payment`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ..._authHeaders(),
+    },
+    body: JSON.stringify({ order_id: orderId }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to confirm payment');
+  }
+  return res.json();
+}
+
+export async function getBillingStatus(): Promise<BillingStatusResponse> {
+  const res = await fetch(`${API_BASE}/api/billing/status`, {
+    headers: _authHeaders(),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to fetch billing status');
+  }
+  return res.json();
+}
+
 

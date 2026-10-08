@@ -160,7 +160,7 @@ async def get_events_feed(limit: int = 10, focus: str = ""):
         "events": [
             {
                 "id": "ev_1",
-                "title": "PRAGNA 1-A & Mimir Collaboration Engine Live",
+                "title": "PRAGNA 1-A Collaboration Engine Live",
                 "summary": "Unified multilingual AI assistant and autonomous coding platform running seamlessly.",
                 "category": "system",
                 "timestamp": datetime.now(timezone.utc).isoformat(),

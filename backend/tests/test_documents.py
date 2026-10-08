@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 def test_upload_txt_document(client, test_settings):
-    files = {"file": ("note.txt", b"Mimir is a local chatbot.", "text/plain")}
+    files = {"file": ("note.txt", b"Pragna is a local chatbot.", "text/plain")}
     response = client.post("/api/documents/upload", files=files)
     assert response.status_code == 200
     body = response.json()
@@ -30,7 +30,7 @@ def test_startup_ingests_existing_folder_files(tmp_path):
 
     documents_dir = tmp_path / "documents"
     documents_dir.mkdir()
-    (documents_dir / "preexisting.txt").write_text("Existing content about mimir.")
+    (documents_dir / "preexisting.txt").write_text("Existing content about pragna.")
 
     settings = Settings(
         _env_file=None,

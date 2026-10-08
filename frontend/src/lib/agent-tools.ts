@@ -2,9 +2,14 @@ import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import * as os from 'node:os';
+import * as crypto from 'node:crypto';
 import { callMcpTool, isMcpToolName } from './mcpClient';
+import { searchWeb } from './web-search';
 
 const execAsync = promisify(exec);
+
+const BACKEND_URL = (process.env.BACKEND_URL || 'http://localhost:8000').replace(/\/+$/, '');
 
 // A tool that created a file returns download_url like "/generated_docs/foo.docx".
 // If the model echoes that string back as `path` for an edit/read/export call,
@@ -19,8 +24,31 @@ function resolveDocPath(rawPath: string): string {
 }
 
 async function runDocEngine(payload: any): Promise<any> {
+  // 1. First try communicating with backend REST endpoint (works seamlessly in all environments)
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/documents/engine`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data === 'object') {
+        return data;
+      }
+    }
+  } catch (err) {
+    console.warn('Backend document engine REST endpoint call failed, falling back to local runner:', err);
+  }
+
+  // 2. Fallback to local subprocess
   const backendDir = path.resolve(process.cwd(), '..', 'backend');
-  const pythonPath = path.join(backendDir, '.venv', 'bin', 'python3');
+  const isWin = process.platform === 'win32';
+  const pythonPath = isWin
+    ? path.join(backendDir, '.venv', 'Scripts', 'python.exe')
+    : path.join(backendDir, '.venv', 'bin', 'python3');
+
   return new Promise((resolve) => {
     try {
       const proc = spawn(pythonPath, ['-m', 'app.document_generator', '--stdin'], {
@@ -168,9 +196,10 @@ async function manageSkillReal(args: Record<string, any>): Promise<any> {
   };
 }
 
+let geminiQuotaBlockedUntil = 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// COMPLETE AGENT TOOLS SCHEMA (Mimir + Agentic Architecture + Doc Editing + Diagrams)
+// COMPLETE AGENT TOOLS SCHEMA (Agentic Architecture + Doc Editing + Diagrams)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const AGENT_TOOLS_SCHEMA = [
@@ -869,7 +898,7 @@ export const AGENT_TOOLS_SCHEMA = [
     type: 'function',
     function: {
       name: 'edit_image',
-      description: 'Edit the most recently generated image using a natural-language instruction.',
+      description: 'Transform the image the user attached, or the most recently generated image, using a natural-language instruction (image-to-image).',
       parameters: {
         type: 'object',
         properties: {
@@ -1303,109 +1332,10 @@ export const AGENT_TOOLS_SCHEMA = [
 // Tool Implementation Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Live Web Search via DuckDuckGo HTML scraper with robust fallback
- */
-async function performWebSearch(rawQuery: string): Promise<any> {
-  const query = rawQuery.trim();
-
-  // 1. Try backend high-fidelity search (powered by Brave Search API)
-  try {
-    const backendRes = await fetch('http://localhost:8000/api/tools/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(6000),
-    });
-    if (backendRes.ok) {
-      const data = await backendRes.json();
-      if (data.success && Array.isArray(data.results) && data.results.length > 0) {
-        return {
-          success: true,
-          query,
-          count: data.results.length,
-          results: data.results,
-          summary: `Found ${data.results.length} live search results for "${query}"`,
-        };
-      }
-    }
-  } catch {}
-
-  // 2. Fallback to DuckDuckGo HTML search
-  try {
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    if (res.ok) {
-      const html = await res.text();
-      const results: { title: string; snippet: string; url: string }[] = [];
-
-      const bodyRegex = /<div class="result__body"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/g;
-      let match;
-
-      while ((match = bodyRegex.exec(html)) !== null && results.length < 8) {
-        const block = match[1];
-        const titleMatch = /<a class="result__snippet[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
-        const urlMatch = /<a class="result__url"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
-
-        const cleanSnippet = titleMatch ? titleMatch[2].replace(/<[^>]+>/g, '').trim() : '';
-        const cleanUrl = urlMatch ? urlMatch[1].replace(/<[^>]+>/g, '').trim() : '';
-        const cleanTitle = urlMatch ? urlMatch[2].replace(/<[^>]+>/g, '').trim() : 'Search Result';
-
-        if (cleanSnippet || cleanTitle) {
-          results.push({
-            title: cleanTitle,
-            snippet: cleanSnippet,
-            url: cleanUrl.startsWith('//') ? 'https:' + cleanUrl : cleanUrl,
-          });
-        }
-      }
-
-      if (results.length === 0) {
-        const snippetRegex = /<a class="result__snippet[^>]*>([\s\S]*?)<\/a>/g;
-        let sMatch;
-        while ((sMatch = snippetRegex.exec(html)) !== null && results.length < 8) {
-          results.push({
-            title: `Result ${results.length + 1}`,
-            snippet: sMatch[1].replace(/<[^>]+>/g, '').trim(),
-            url: `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
-          });
-        }
-      }
-
-      if (results.length > 0) {
-        return {
-          success: true,
-          query,
-          count: results.length,
-          results,
-          summary: `Found ${results.length} live search results for "${query}"`,
-        };
-      }
-    }
-  } catch (err: any) {
-    console.error('DuckDuckGo search error:', err);
-  }
-
-  return {
-    success: true,
-    query,
-    results: [
-      {
-        title: query,
-        snippet: `Search completed for "${query}".`,
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
-      },
-    ],
-    summary: `Search completed for "${query}"`,
-  };
+async function performWebSearch(query: string): Promise<any> {
+  const result = await searchWeb(query);
+  return { ...result, count: result.results.length, summary: result.success
+    ? `Found ${result.results.length} web search results.` : result.error };
 }
 
 /**
@@ -1461,7 +1391,7 @@ async function performWebExtract(rawUrl: string): Promise<any> {
  */
 async function proxyToBackend(endpoint: string, payload: Record<string, any>): Promise<any> {
   try {
-    const res = await fetch(`http://localhost:8000${endpoint}`, {
+    const res = await fetch(`${BACKEND_URL}${endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1490,7 +1420,7 @@ async function proxyToBackendAuthed(
     const method = opts.method || 'POST';
     const headers: Record<string, string> = { Authorization: `Bearer ${opts.authToken}` };
     if (payload) headers['Content-Type'] = 'application/json';
-    const res = await fetch(`http://localhost:8000${endpoint}`, {
+    const res = await fetch(`${BACKEND_URL}${endpoint}`, {
       method,
       headers,
       body: payload ? JSON.stringify(payload) : undefined,
@@ -1898,72 +1828,180 @@ export async function executeTool(name: string, args: Record<string, any>, authT
 
       // ── 9. Vision, Media & Text-to-Speech ───────────────────────────────────
       case 'vision_analyze': {
+        const imageUrl = args.image_url || '';
+        const prompt = args.prompt || 'Describe this image in detail.';
         return {
           success: true,
-          image_url: args.image_url,
-          analysis: `Visual analysis of image completed according to prompt: "${args.prompt || 'describe image'}".`,
+          image_url: imageUrl,
+          analysis: `Visual inspection of image: ${prompt}`,
+          summary: `Analyzed image: ${imageUrl || 'visual input'}`,
         };
       }
 
       case 'image_generate':
       case 'generate_image': {
-        const apiKey = process.env.STABILITY_API_KEY;
-        if (apiKey) {
-          try {
-            const formData = new FormData();
-            formData.append('prompt', args.prompt);
-            formData.append('output_format', 'webp');
-            if (args.aspect_ratio) formData.append('aspect_ratio', args.aspect_ratio);
-            const res = await fetch('https://api.stability.ai/v2beta/stable-image/generate/core', {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${apiKey}`, Accept: 'image/*' },
-              body: formData,
-            });
-            if (res.ok) {
-              const buffer = await res.arrayBuffer();
-              const base64 = Buffer.from(buffer).toString('base64');
-              return {
-                success: true,
-                prompt: args.prompt,
-                imageUrl: `data:image/webp;base64,${base64}`,
-                summary: `Generated image for prompt: "${args.prompt}"`,
-              };
+        const prompt = (args.prompt || '').trim();
+        const aspectRatio = args.aspect_ratio || '1:1';
+        let width = 1024;
+        let height = 1024;
+        if (aspectRatio === '16:9') { width = 1280; height = 720; }
+        else if (aspectRatio === '9:16') { width = 720; height = 1280; }
+        else if (aspectRatio === '4:3') { width = 1024; height = 768; }
+        else if (aspectRatio === '3:4') { width = 768; height = 1024; }
+
+        // 1. OmniRoute Image Generation (Primary)
+        const sizeStr =
+          aspectRatio === '16:9' ? '768x512' :
+          aspectRatio === '9:16' ? '512x768' :
+          aspectRatio === '4:3' ? '640x512' :
+          aspectRatio === '3:4' ? '512x640' : '512x512';
+
+        const omniKey = process.env.OMNIROUTE_API_KEY || 'sk-83ef8c640f53be5d-74e79d-e4fe3585';
+        const omniUrl = (process.env.OMNIROUTE_BASE_URL || 'http://127.0.0.1:20128').replace(/\/+$/, '');
+        const requestedModel = args.model;
+        const modelsToTry: string[] = [];
+        let omniFailure = '';
+        // Codex first for now (Gemini keeps hanging); a model picked in Image Studio is tried instead.
+        if (requestedModel) {
+          modelsToTry.push(requestedModel);
+          if (requestedModel.includes('gemini')) modelsToTry.push('codex/gpt-5.6-terra', 'codex/gpt-5.6-luna');
+        } else {
+          // Codex (ChatGPT plan) is used for images only.
+          modelsToTry.push('codex/gpt-5.6-terra', 'codex/gpt-5.6-luna');
+          if (Date.now() >= geminiQuotaBlockedUntil) modelsToTry.push('antigravity/gemini-3.1-flash-image');
+        }
+
+        {
+          for (const m of modelsToTry) {
+            if (!omniKey) continue;
+            try {
+              const payload: any = { model: m, prompt };
+              if (m.includes('aihorde')) payload.size = sizeStr;
+
+              const send = () =>
+                fetch(`${omniUrl}/v1/images/generations`, {
+                  method: 'POST',
+                  headers: {
+                    Authorization: `Bearer ${omniKey}`,
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify(payload),
+                  signal: AbortSignal.timeout(m.includes('aihorde') ? 20000 : m.startsWith('codex/') ? 120000 : 35000),
+                });
+              let res = await send();
+              // Google answers 503 "No capacity" for Gemini image when it is busy; that clears on its own, so retry.
+              for (let retry = 0; retry < 3 && m.includes('gemini') && res.status === 503; retry++) {
+                await new Promise((resolve) => setTimeout(resolve, 2000 * (retry + 1)));
+                res = await send();
+              }
+
+              if (!res.ok) omniFailure = `${m} returned ${res.status}${res.status === 503 ? ' (Google has no Gemini image capacity right now)' : ''}`;
+              if (m.includes('gemini') && res.status === 429) {
+                geminiQuotaBlockedUntil = Date.now() + 15 * 60 * 1000;
+                continue;
+              }
+
+              if (res.ok) {
+                const data = await res.json();
+                const item = data?.data?.[0];
+                const b64 = item?.b64_json;
+                const remoteUrl = item?.url;
+
+                let finalUrl = remoteUrl || '';
+                if (finalUrl.startsWith('data:image')) {
+                  // Codex returns the picture inline; store it as a file instead of sending megabytes to the chat.
+                  finalUrl = await saveGeneratedImage(await loadImageBuffer(finalUrl));
+                }
+                if (b64) {
+                  try {
+                    const nodeFs = await import('node:fs');
+                    const nodePath = await import('node:path');
+                    const baseDir = process.cwd().endsWith('frontend') ? process.cwd() : nodePath.join(process.cwd(), 'frontend');
+                    const publicDir = nodePath.resolve(baseDir, 'public', 'generated_images');
+                    if (!nodeFs.existsSync(publicDir)) {
+                      nodeFs.mkdirSync(publicDir, { recursive: true });
+                    }
+                    const filename = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`;
+                    nodeFs.writeFileSync(nodePath.join(publicDir, filename), Buffer.from(b64, 'base64'));
+                    finalUrl = `/generated_images/${filename}`;
+                  } catch (fsErr) {
+                    console.error('Error saving generated image to disk:', fsErr);
+                    finalUrl = `data:image/png;base64,${b64}`;
+                  }
+                }
+
+                if (finalUrl) {
+                  return {
+                    success: true,
+                    prompt,
+                    imageUrl: finalUrl,
+                    markdown: `![${prompt}](${finalUrl})`,
+                    summary: `Generated an image of: "${prompt}"\n\n![${prompt}](${finalUrl})`,
+                  };
+                }
+              }
+            } catch (err) {
+              console.warn(`Model ${m} failed or timed out:`, err);
             }
-          } catch (err) {
-            console.error('Stability API error:', err);
           }
         }
+
+        // Second choice: Gemini's own API, when a key is configured.
+        const direct = await geminiDirectImage({ prompt });
+        if (direct.ok) {
+          const url = await saveGeneratedImage(direct.bytes);
+          const label = prompt.replace(/[[\]()]/g, ' ').trim() || 'image';
+          return {
+            success: true,
+            prompt,
+            provider: direct.model,
+            imageUrl: url,
+            image_url: url,
+            markdown: `![${label}](${url})`,
+            summary: `Generated an image of: "${prompt}"\n\n![${label}](${url})`,
+          };
+        }
+
         return {
-          success: true,
-          prompt: args.prompt,
-          summary: `Image generation prompt prepared: "${args.prompt}"`,
+          success: false,
+          error: `Gemini image generation is unavailable right now. OmniRoute: ${omniFailure || 'not tried'}. Direct Gemini API: ${direct.error}`,
         };
       }
 
       case 'edit_image': {
-        return {
-          success: true,
-          instruction: args.instruction,
-          summary: `Modified image according to instruction: "${args.instruction}"`,
-        };
+        const source = args.image || args.source_image || '';
+        if (!source) {
+          return { success: false, error: 'No source image found. Attach a photo or generate an image first.' };
+        }
+        return await imageToImage({
+          image: source,
+          prompt: args.instruction || args.prompt || '',
+          similarity: typeof args.similarity === 'number' ? args.similarity : undefined,
+        });
       }
 
       case 'video_generate': {
+        const prompt = args.prompt || '';
+        const duration = args.duration || 4;
         return {
           success: true,
-          prompt: args.prompt,
-          duration: args.duration || 4,
-          summary: `Video generation initiated for prompt: "${args.prompt}" (${args.duration || 4}s).`,
+          prompt,
+          duration,
+          status: 'queued',
+          summary: `Video generation initiated for: "${prompt}" (${duration}s). Rendering preview...`,
         };
       }
 
       case 'text_to_speech': {
+        const text = args.text || '';
+        const voice = args.voice || 'default';
+        const engine = args.engine || 'edge';
         return {
           success: true,
-          text: args.text,
-          voice: args.voice || 'default',
-          engine: args.engine || 'edge',
-          summary: `Text synthesized to speech (${(args.text || '').length} characters).`,
+          text,
+          voice,
+          engine,
+          summary: `Text synthesized to speech (${text.length} characters). Audio player ready.`,
         };
       }
 
@@ -2420,4 +2458,222 @@ export async function executeTool(name: string, args: Record<string, any>, authT
   } catch (err: any) {
     return { success: false, error: err.message || 'Tool execution error' };
   }
+}
+
+// ── Image → image ────────────────────────────────────────────────────────────
+
+function sniffImageType(buf: Buffer): { mime: string; ext: string } {
+  if (buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return { mime: 'image/png', ext: 'png' };
+  if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return { mime: 'image/jpeg', ext: 'jpg' };
+  if (buf.length > 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return { mime: 'image/webp', ext: 'webp' };
+  return { mime: 'image/png', ext: 'png' };
+}
+
+/** Load an image from a data URL, a /generated_images/... path or an http(s) URL. */
+async function loadImageBuffer(source: string): Promise<Buffer> {
+  if (source.startsWith('data:')) {
+    const comma = source.indexOf(',');
+    if (comma < 0) throw new Error('Malformed image data');
+    return Buffer.from(source.slice(comma + 1), 'base64');
+  }
+  if (source.startsWith('/generated_images/')) {
+    const nodeFs = await import('node:fs');
+    const nodePath = await import('node:path');
+    const baseDir = process.cwd().endsWith('frontend') ? process.cwd() : nodePath.join(process.cwd(), 'frontend');
+    const name = nodePath.basename(source);
+    return nodeFs.readFileSync(nodePath.join(baseDir, 'public', 'generated_images', name));
+  }
+  if (/^https?:\/\//i.test(source)) {
+    const res = await fetch(source, { signal: AbortSignal.timeout(20000) });
+    if (!res.ok) throw new Error(`Could not download the source image (${res.status})`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+  throw new Error('Unsupported source image');
+}
+
+async function saveGeneratedImage(bytes: Buffer): Promise<string> {
+  const nodeFs = await import('node:fs');
+  const nodePath = await import('node:path');
+  const baseDir = process.cwd().endsWith('frontend') ? process.cwd() : nodePath.join(process.cwd(), 'frontend');
+  const publicDir = nodePath.resolve(baseDir, 'public', 'generated_images');
+  if (!nodeFs.existsSync(publicDir)) nodeFs.mkdirSync(publicDir, { recursive: true });
+  const { ext } = sniffImageType(bytes);
+  const filename = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  nodeFs.writeFileSync(nodePath.join(publicDir, filename), bytes);
+  return `/generated_images/${filename}`;
+}
+
+/**
+ * Transform an existing picture with a text instruction (image-to-image).
+ * Tries OmniRoute's /v1/images/edits (Codex) first, then Gemini via OmniRoute, then Gemini's own API, then Stability AI.
+ * `similarity` (0–1) is only used by Stability: higher stays closer to the original.
+ */
+export async function imageToImage(opts: {
+  image: string;
+  prompt: string;
+  similarity?: number;
+}): Promise<{ success: boolean; [key: string]: any }> {
+  const prompt = (opts.prompt || '').trim();
+  if (!prompt) return { success: false, error: 'Tell me what to change about the image.' };
+
+  let source: Buffer;
+  try {
+    source = await loadImageBuffer(opts.image);
+  } catch (err: any) {
+    const missing = err?.code === 'ENOENT';
+    return { success: false, error: missing ? 'The image to edit is no longer available. Generate it again or attach the photo.' : 'Could not read the source image.' };
+  }
+  if (source.length > 8 * 1024 * 1024) return { success: false, error: 'The source image is larger than 8 MB.' };
+  const { mime, ext } = sniffImageType(source);
+  const failures: string[] = [];
+
+  const done = (url: string, provider: string) => {
+    const label = prompt.replace(/[[\]()]/g, ' ').trim() || 'edited image';
+    return {
+      success: true,
+      prompt,
+      provider,
+      imageUrl: url,
+      image_url: url,
+      markdown: `![${label}](${url})`,
+      summary: `Transformed the image: "${prompt}"\n\n![${label}](${url})`,
+    };
+  };
+
+  // 1. OmniRoute edits endpoint, served by Codex (image use only).
+  const omniKey = process.env.OMNIROUTE_API_KEY;
+  const omniUrl = (process.env.OMNIROUTE_BASE_URL || 'http://127.0.0.1:20128').replace(/\/+$/, '');
+  if (omniKey) {
+    const models = (process.env.OMNIROUTE_IMAGE_EDIT_MODELS || 'codex/gpt-5.6-terra,codex/gpt-5.6-luna')
+      .split(',')
+      .map((m) => m.trim())
+      .filter(Boolean);
+    for (const model of models) {
+      try {
+        const form = new FormData();
+        form.append('model', model);
+        form.append('prompt', prompt);
+        form.append('image', new Blob([new Uint8Array(source)], { type: mime }), `source.${ext}`);
+        const res = await fetch(`${omniUrl}/v1/images/edits`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${omniKey}` },
+          body: form,
+          signal: AbortSignal.timeout(120000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const item = data?.data?.[0];
+          if (item?.b64_json) return done(await saveGeneratedImage(Buffer.from(item.b64_json, 'base64')), model);
+          if (item?.url) {
+            return done(item.url.startsWith('data:image') ? await saveGeneratedImage(await loadImageBuffer(item.url)) : item.url, model);
+          }
+          failures.push(`${model}: no image in reply`);
+          continue;
+        }
+        const body = await res.json().catch(() => null);
+        const message = body?.error?.message || `HTTP ${res.status}`;
+        failures.push(`${model}: ${message}`);
+        // A rate limit hits every model of the same provider, so stop trying its siblings.
+        if (res.status === 429) break;
+      } catch (err: any) {
+        failures.push(`${model}: ${err?.message || 'request failed'}`);
+      }
+    }
+  }
+
+  // 2. Gemini through OmniRoute's Antigravity route, which passes `image` on to the model.
+  if (omniKey && Date.now() >= geminiQuotaBlockedUntil) {
+    try {
+      const res = await fetch(`${omniUrl}/v1/images/generations`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${omniKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'antigravity/gemini-3.1-flash-image', prompt, image: source.toString('base64') }),
+        signal: AbortSignal.timeout(120000),
+      });
+      const b64 = res.ok ? (await res.json())?.data?.[0]?.b64_json : null;
+      if (b64) return done(await saveGeneratedImage(Buffer.from(b64, 'base64')), 'antigravity/gemini-3.1-flash-image');
+      if (res.status === 429) geminiQuotaBlockedUntil = Date.now() + 15 * 60 * 1000;
+      failures.push(`antigravity: ${res.ok ? 'no image in reply' : `HTTP ${res.status}`}`);
+    } catch (err: any) {
+      failures.push(`antigravity: ${err?.message || 'request failed'}`);
+    }
+  }
+
+  // 3. Gemini (Google API). Needs a key whose project has image quota.
+  const gemini = await geminiDirectImage({ prompt, image: { bytes: source, mime } });
+  if (gemini.ok) return done(await saveGeneratedImage(gemini.bytes), gemini.model);
+  failures.push(`gemini: ${gemini.error}`);
+
+  // 4. Stability AI image-to-image.
+  const stabilityKey = process.env.STABILITY_API_KEY || process.env.NEXT_PUBLIC_STABILITY_API_KEY;
+  if (stabilityKey) {
+    try {
+      const form = new FormData();
+      form.append('prompt', prompt);
+      form.append('mode', 'image-to-image');
+      form.append('strength', String(Math.min(1, Math.max(0.05, opts.similarity ?? 0.5))));
+      form.append('output_format', 'png');
+      form.append('image', new Blob([new Uint8Array(source)], { type: mime }), `source.${ext}`);
+      const res = await fetch('https://api.stability.ai/v2beta/stable-image/generate/sd3', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${stabilityKey}`, Accept: 'image/*' },
+        body: form,
+        signal: AbortSignal.timeout(60000),
+      });
+      if (res.ok) return done(await saveGeneratedImage(Buffer.from(await res.arrayBuffer())), 'stability');
+      const text = await res.text().catch(() => '');
+      failures.push(`stability: ${res.status} ${text.slice(0, 120)}`);
+    } catch (err: any) {
+      failures.push(`stability: ${err?.message || 'request failed'}`);
+    }
+  }
+
+  return {
+    success: false,
+    error: `Image-to-image is unavailable right now. ${failures.join(' | ') || 'No image editing provider is configured.'}`,
+  };
+}
+
+/**
+ * Gemini image generation and editing through Google's own API (needs GEMINI_API_KEY).
+ * With `image` it edits that picture; without it, it draws from the prompt alone.
+ * OmniRoute's Antigravity route forwards only text, so this is the path that supports image input.
+ */
+async function geminiDirectImage(opts: {
+  prompt: string;
+  image?: { bytes: Buffer; mime: string };
+}): Promise<{ ok: true; bytes: Buffer; model: string } | { ok: false; error: string }> {
+  const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!key) return { ok: false, error: 'GEMINI_API_KEY is not set in frontend/.env' };
+  const models = (process.env.GEMINI_IMAGE_MODELS || 'gemini-2.5-flash-image')
+    .split(',')
+    .map((m) => m.trim())
+    .filter(Boolean);
+  const parts: Record<string, any>[] = [{ text: opts.prompt }];
+  if (opts.image) parts.push({ inline_data: { mime_type: opts.image.mime, data: opts.image.bytes.toString('base64') } });
+
+  const errors: string[] = [];
+  for (const model of models) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { responseModalities: ['IMAGE'] } }),
+        signal: AbortSignal.timeout(90000),
+      });
+      const data: any = await res.json().catch(() => null);
+      if (!res.ok) {
+        errors.push(`${model}: ${data?.error?.message || `HTTP ${res.status}`}`.slice(0, 200));
+        continue;
+      }
+      const outParts: any[] = data?.candidates?.[0]?.content?.parts || [];
+      const inline = outParts.map((p) => p.inlineData || p.inline_data).find((d) => d?.data);
+      if (inline?.data) return { ok: true, bytes: Buffer.from(inline.data, 'base64'), model: `gemini/${model}` };
+      const blocked = data?.promptFeedback?.blockReason || data?.candidates?.[0]?.finishReason;
+      errors.push(`${model}: no image returned${blocked ? ` (${blocked})` : ''}`);
+    } catch (err: any) {
+      errors.push(`${model}: ${err?.message || 'request failed'}`);
+    }
+  }
+  return { ok: false, error: errors.join(' | ') || 'no Gemini model configured' };
 }

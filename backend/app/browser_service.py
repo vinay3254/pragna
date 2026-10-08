@@ -6,7 +6,7 @@ from typing import Any
 from playwright.async_api import async_playwright, BrowserContext, Page
 from bs4 import BeautifulSoup
 
-logger = logging.getLogger("mimir.browser")
+logger = logging.getLogger("pragna.browser")
 
 
 class BrowserService:

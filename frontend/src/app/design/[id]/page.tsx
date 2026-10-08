@@ -1,0 +1,1609 @@
+'use client';
+
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
+import { useParams } from 'next/navigation';
+import { toast } from 'sonner';
+import {
+  ArrowLeft,
+  ArrowUp,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Code2,
+  Download,
+  FileCode2,
+  FolderArchive,
+  Hand,
+  History,
+  ImagePlus,
+  LayoutGrid,
+  Loader2,
+  Maximize2,
+  MessageSquare,
+  Minus,
+  Monitor,
+  MousePointer2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Palette,
+  Plus,
+  Smartphone,
+  Square,
+  Tablet,
+  Type,
+  X,
+} from 'lucide-react';
+import ScreenFrame from '../components/ScreenFrame';
+import SidePanel, { ElementSelection, PanelTab } from '../components/SidePanel';
+import { AppearanceButton, DesignMark } from '../components/DesignChrome';
+import {
+  DEVICE_FRAME,
+  DesignDevice,
+  DesignMessage,
+  DesignProject,
+  DesignScreen,
+  DesignTheme,
+  GenerateEvent,
+  designApi,
+  downloadDataUrl,
+  downloadProjectZip,
+  downloadScreenHtml,
+  readImageFile,
+  slug,
+  streamGenerate,
+  takePendingStart,
+} from '@/lib/design';
+
+const GAP = 64;
+const FRAME_HEADER = 44;
+const COLUMNS: Record<DesignDevice, number> = { mobile: 3, web: 2 };
+const MIN_SCALE = 0.1;
+const MAX_SCALE = 2;
+type Scope = 'project' | 'screen' | 'add';
+type CanvasMode = 'canvas' | 'preview' | 'code';
+interface View {
+  x: number;
+  y: number;
+  scale: number;
+}
+const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
+const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+const newMessage = (role: DesignMessage['role'], content: string): DesignMessage => ({
+  id: crypto.randomUUID(),
+  role,
+  content,
+  created_at: new Date().toISOString(),
+});
+
+export default function DesignCanvasPage() {
+  const { id } = useParams<{ id: string }>();
+  const projectId = Number(id);
+  const [project, setProject] = useState<DesignProject | null>(null);
+  const [screens, setScreens] = useState<DesignScreen[]>([]);
+  const [messages, setMessages] = useState<DesignMessage[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [reload, setReload] = useState(0);
+  const [building, setBuilding] = useState<Set<number>>(new Set());
+  const [errors, setErrors] = useState<Record<number, string>>({});
+  const [activeId, setActiveId] = useState<number | null>(null);
+  const [selection, setSelection] = useState<ElementSelection | null>(null);
+  const [operation, setOperation] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [prompt, setPrompt] = useState('');
+  const [image, setImage] = useState<string | null>(null);
+  const [scope, setScope] = useState<Scope>('add');
+  const [panel, setPanel] = useState<PanelTab | null>(null);
+  const [historyKey, setHistoryKey] = useState(0);
+  const [view, setView] = useState<View>({ x: 40, y: 60, scale: 0.6 });
+  const [nameDraft, setNameDraft] = useState('');
+  const [mode, setMode] = useState<CanvasMode>('canvas');
+  const [tool, setTool] = useState<'select' | 'hand'>('select');
+  const [chatOpen, setChatOpen] = useState(true);
+  const [sideTab, setSideTab] = useState<'chat' | 'screens'>('chat');
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [savingTheme, setSavingTheme] = useState(false);
+  const [previewWidth, setPreviewWidth] = useState(1280);
+  const [viewportSize, setViewportSize] = useState({ width: 800, height: 600 });
+
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const chatEnd = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+  const exportRef = useRef<HTMLDivElement>(null);
+  const frames = useRef(new Map<number, HTMLIFrameElement>());
+  const captures = useRef(
+    new Map<number, { resolve: (url: string) => void; reject: (error: Error) => void }>()
+  );
+  const purposes = useRef(new Map<number, string>());
+  const screensRef = useRef<DesignScreen[]>([]);
+  const projectRef = useRef<DesignProject | null>(null);
+  const busyRef = useRef(false);
+  const modeRef = useRef<CanvasMode>('canvas');
+  const savedTheme = useRef<DesignTheme | null>(null);
+  const themeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const themeQueue = useRef<DesignTheme | null>(null);
+  const themeWriting = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const drag = useRef<{ x: number; y: number } | null>(null);
+  const startedAt = useRef(0);
+  const mounted = useRef(true);
+  const receivedScreen = useRef(false);
+  const previewGeneratedDesign = useRef(false);
+
+  screensRef.current = screens;
+  projectRef.current = project;
+  modeRef.current = mode;
+  const busy = operation !== null;
+  const device = project?.device ?? 'web';
+  const frame = DEVICE_FRAME[device];
+  const activeScreen = screens.find((s) => s.id === activeId) ?? null;
+  const builtCount = screens.filter((s) => s.html).length;
+  const editableScreens = screens.filter((s) => s.body);
+
+  const fitView = useCallback((count: number, dev: DesignDevice) => {
+    const el = viewportRef.current;
+    if (!el || count < 1) return;
+    const f = DEVICE_FRAME[dev],
+      cols = Math.min(count, COLUMNS[dev]),
+      rows = Math.ceil(count / COLUMNS[dev]);
+    const width = cols * f.width + (cols - 1) * GAP,
+      height = rows * (f.height + FRAME_HEADER) + (rows - 1) * GAP;
+    const scale = clamp(
+      Math.min((el.clientWidth - 80) / width, (el.clientHeight - 100) / height),
+      MIN_SCALE,
+      1
+    );
+    setView({
+      scale,
+      x: (el.clientWidth - width * scale) / 2,
+      y: (el.clientHeight - height * scale) / 2,
+    });
+  }, []);
+  const focusScreen = (screen: DesignScreen) => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const index = screensRef.current.findIndex((s) => s.id === screen.id);
+    const f = DEVICE_FRAME[projectRef.current?.device ?? 'web'];
+    const scale = clamp(
+      Math.min(
+        (el.clientWidth - 80) / f.width,
+        (el.clientHeight - 100) / (f.height + FRAME_HEADER)
+      ),
+      MIN_SCALE,
+      1
+    );
+    const cols = COLUMNS[projectRef.current?.device ?? 'web'];
+    setView({
+      scale,
+      x: (el.clientWidth - f.width * scale) / 2 - (index % cols) * (f.width + GAP) * scale,
+      y:
+        (el.clientHeight - (f.height + FRAME_HEADER) * scale) / 2 -
+        Math.floor(index / cols) * (f.height + FRAME_HEADER + GAP) * scale,
+    });
+  };
+  const zoomBy = (factor: number) => {
+    const el = viewportRef.current;
+    if (!el) return;
+    setView((v) => zoomAround(v, el.clientWidth / 2, el.clientHeight / 2, v.scale * factor));
+  };
+
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() =>
+      setViewportSize({ width: el.clientWidth, height: el.clientHeight })
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [loading]);
+  useEffect(() => {
+    if (mode !== 'canvas') return;
+    const el = viewportRef.current;
+    if (!el) return;
+    const wheel = (e: WheelEvent) => {
+      e.preventDefault();
+      if (e.ctrlKey || e.metaKey) {
+        const rect = el.getBoundingClientRect();
+        setView((v) =>
+          zoomAround(
+            v,
+            e.clientX - rect.left,
+            e.clientY - rect.top,
+            v.scale * Math.exp(-e.deltaY * 0.002)
+          )
+        );
+      } else setView((v) => ({ ...v, x: v.x - e.deltaX, y: v.y - e.deltaY }));
+    };
+    el.addEventListener('wheel', wheel, { passive: false });
+    return () => el.removeEventListener('wheel', wheel);
+  }, [loading, mode]);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]')) return;
+      if (e.key === 'Escape') {
+        setPanel(null);
+        setExportOpen(false);
+        clearSelection();
+      }
+      if (e.key === '0') {
+        e.preventDefault();
+        fitView(screensRef.current.length, projectRef.current?.device ?? 'web');
+      }
+      if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        zoomBy(1.2);
+      }
+      if (e.key === '-') {
+        e.preventDefault();
+        zoomBy(1 / 1.2);
+      }
+      if (e.key.toLowerCase() === 'v') setTool('select');
+      if (e.key.toLowerCase() === 'h') setTool('hand');
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitView]);
+  useEffect(() => {
+    if (!exportOpen) return;
+    const close = (e: PointerEvent) => {
+      if (!exportRef.current?.contains(e.target as Node)) setExportOpen(false);
+    };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [exportOpen]);
+  useEffect(() => {
+    chatEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages.length, operation, sideTab]);
+  useEffect(() => {
+    if (!busy) return;
+    const timer = setInterval(
+      () => setElapsed(Math.floor((Date.now() - startedAt.current) / 1000)),
+      1000
+    );
+    return () => clearInterval(timer);
+  }, [busy]);
+
+  useEffect(() => {
+    let cancelled = false;
+    mounted.current = true;
+    setLoading(true);
+    setLoadError(null);
+    if (!Number.isInteger(projectId) || projectId < 1) {
+      setLoadError('This design link is invalid.');
+      setLoading(false);
+      return;
+    }
+    designApi
+      .getProject(projectId)
+      .then((detail) => {
+        if (cancelled) return;
+        setProject(detail.project);
+        setNameDraft(detail.project.name);
+        setScreens(detail.screens);
+        setMessages(detail.messages ?? []);
+        savedTheme.current = detail.project.theme;
+        const first = detail.screens.find((s) => s.body);
+        setActiveId(first?.id ?? null);
+        setScope(first ? 'screen' : 'add');
+        setPreviewWidth(DEVICE_FRAME[detail.project.device].width);
+        setMode(first ? 'preview' : 'canvas');
+        if (window.innerWidth < 768 && first) {
+          setChatOpen(false);
+          setMode('preview');
+          setPreviewWidth(390);
+        }
+        setLoading(false);
+        requestAnimationFrame(() => fitView(detail.screens.length, detail.project.device));
+        const start = takePendingStart(projectId);
+        if (start) runGenerate(start.prompt, start.image, false);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setLoadError(error instanceof Error ? error.message : 'Could not load design');
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+      mounted.current = false;
+      abortRef.current?.abort();
+      if (themeTimer.current) clearTimeout(themeTimer.current);
+      captures.current.forEach((capture) => capture.reject(new Error('Canvas closed')));
+      captures.current.clear();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, reload]);
+
+  const sendMode = useCallback(
+    (id: number) =>
+      frames.current
+        .get(id)
+        ?.contentWindow?.postMessage(
+          { type: 'mode', mode: modeRef.current === 'preview' ? 'preview' : 'select' },
+          '*'
+        ),
+    []
+  );
+  const registerFrame = useCallback((id: number, el: HTMLIFrameElement | null) => {
+    if (el) frames.current.set(id, el);
+    else frames.current.delete(id);
+  }, []);
+  useEffect(() => {
+    frames.current.forEach((_, id) => sendMode(id));
+    if (mode !== 'canvas') setSelection(null);
+  }, [mode, sendMode]);
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const data = e.data;
+      if (!data || data.source !== 'pragna-design') return;
+      let owner: number | null = null;
+      frames.current.forEach((el, id) => {
+        if (el.contentWindow === e.source) owner = id;
+      });
+      if (owner === null || owner !== data.screenId) return;
+      if (data.type === 'ready') sendMode(owner);
+      if (data.type === 'select' && modeRef.current === 'canvas') {
+        frames.current.forEach((el, id) => {
+          if (id !== owner) el.contentWindow?.postMessage({ type: 'clear' }, '*');
+        });
+        setSelection({
+          screenId: owner,
+          tag: String(data.tag),
+          html: String(data.html),
+          selector: String(data.selector ?? ''),
+          text: String(data.text ?? ''),
+          canEdit: data.canEdit === true,
+        });
+        setActiveId(owner);
+        setScope('screen');
+        setPanel('inspect');
+      } else if (data.type === 'png') captures.current.get(owner)?.resolve(String(data.url));
+      else if (data.type === 'png-error')
+        captures.current.get(owner)?.reject(new Error(String(data.error)));
+      else if (data.type === 'navigate' && modeRef.current === 'preview') {
+        let href = String(data.href ?? '');
+        try {
+          href = decodeURIComponent(href);
+        } catch {}
+        const names = [
+          normalize(String(data.label ?? '')),
+          normalize(href.replace(/^.*\//, '').replace(/\.html?(?:[?#].*)?$/, '')),
+        ].filter(Boolean);
+        const next = screensRef.current.find(
+          (s) => s.html && names.some((n) => n === normalize(s.name))
+        );
+        if (next) {
+          setActiveId(next.id);
+          return;
+        }
+        toast.info('This link has no matching screen yet. Add a screen to complete the flow.');
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [sendMode]);
+
+  function clearSelection() {
+    frames.current.forEach((el) => el.contentWindow?.postMessage({ type: 'clear' }, '*'));
+    setSelection(null);
+  }
+  const activate = (screen: DesignScreen, focus = false) => {
+    clearSelection();
+    setActiveId(screen.id);
+    setScope('screen');
+    if (focus) focusScreen(screen);
+  };
+  const markDone = (id: number) =>
+    setBuilding((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  const replaceScreen = (updated: DesignScreen) => {
+    setSelection((selected) => (selected?.screenId === updated.id ? null : selected));
+    setScreens((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+  };
+  const append = (role: DesignMessage['role'], content: string) =>
+    setMessages((prev) => [...prev, newMessage(role, content)]);
+  const syncMessages = async () => {
+    try {
+      const detail = await designApi.getProject(projectId);
+      if (mounted.current) setMessages(detail.messages ?? []);
+    } catch {}
+  };
+  const begin = (label: string) => {
+    if (busyRef.current || themeWriting.current || themeQueue.current) return false;
+    busyRef.current = true;
+    setOperation(label);
+    startedAt.current = Date.now();
+    setElapsed(0);
+    return true;
+  };
+  const finish = () => {
+    busyRef.current = false;
+    if (mounted.current) {
+      setOperation(null);
+      setBuilding(new Set());
+      setHistoryKey((k) => k + 1);
+    }
+  };
+  const onGenerateEvent = (event: GenerateEvent) => {
+    if (event.type === 'plan') {
+      const prevCount = screensRef.current.length;
+      setProject((p) =>
+        p ? { ...p, name: event.project_name || p.name, theme: event.theme ?? p.theme } : p
+      );
+      setNameDraft((name) => event.project_name || name);
+      savedTheme.current = event.theme ?? savedTheme.current;
+      setScreens((prev) => [
+        ...prev,
+        ...event.screens.map((s, i) => ({
+          id: s.id,
+          name: s.name,
+          position: prev.length + i,
+          version_id: null,
+          body: null,
+          html: null,
+        })),
+      ]);
+      event.screens.forEach((s) => purposes.current.set(s.id, s.purpose));
+      setBuilding(new Set(event.screens.map((s) => s.id)));
+      setOperation('Building your design');
+      requestAnimationFrame(() =>
+        fitView(prevCount + event.screens.length, projectRef.current?.device ?? 'web')
+      );
+    } else if (event.type === 'screen') {
+      receivedScreen.current = true;
+      if (previewGeneratedDesign.current) {
+        setMode('preview');
+        previewGeneratedDesign.current = false;
+      }
+      setSelection((selected) => (selected?.screenId === event.id ? null : selected));
+      setScreens((prev) =>
+        prev.map((s) =>
+          s.id === event.id
+            ? { ...s, version_id: event.version_id, body: event.body, html: event.html }
+            : s
+        )
+      );
+      setActiveId((id) => id ?? event.id);
+      markDone(event.id);
+      setErrors((prev) => {
+        const next = { ...prev };
+        delete next[event.id];
+        return next;
+      });
+    } else if (event.type === 'screen_error') {
+      setErrors((prev) => ({ ...prev, [event.id]: event.error }));
+      markDone(event.id);
+    } else if (event.type === 'error') {
+      toast.error(event.error);
+      append('assistant', event.error);
+    }
+  };
+
+  async function runGenerate(text: string, img: string | undefined, add: boolean) {
+    if (!begin(add ? 'Planning another screen' : 'Planning your design')) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    receivedScreen.current = false;
+    previewGeneratedDesign.current = !add;
+    setGenerating(true);
+    append('user', text || 'Design from this reference image');
+    try {
+      await streamGenerate(
+        projectId,
+        { prompt: text, image: img, add },
+        onGenerateEvent,
+        controller.signal
+      );
+      if (mounted.current) {
+        const detail = await designApi.getProject(projectId);
+        setScreens(detail.screens);
+        setProject(detail.project);
+        setNameDraft(detail.project.name);
+        setMessages(detail.messages ?? []);
+        setScope(detail.screens.some((s) => s.body) ? 'screen' : 'add');
+        if (!detail.screens.some((s) => s.body)) {
+          setPrompt(text);
+          setImage(img ?? null);
+        }
+        setActiveId((id) => id ?? detail.screens.find((s) => s.body)?.id ?? null);
+      }
+    } catch (error) {
+      if (mounted.current) {
+        if (controller.signal.aborted) {
+          append(
+            'assistant',
+            'Generation stopped. Completed screens are saved. Use Build screen to finish any remaining screens.'
+          );
+        } else {
+          const message = error instanceof Error ? error.message : 'Generation failed';
+          toast.error(message);
+          append('assistant', message);
+          setPrompt(text);
+          setImage(img ?? null);
+          setScope('add');
+        }
+      }
+    } finally {
+      abortRef.current = null;
+      if (mounted.current) {
+        setGenerating(false);
+        setStopping(false);
+      }
+      finish();
+    }
+  }
+
+  async function runScreenAction(
+    screen: DesignScreen,
+    action: () => Promise<DesignScreen>,
+    label: string
+  ) {
+    if (!begin(label)) return false;
+    setBuilding(new Set([screen.id]));
+    try {
+      replaceScreen(await action());
+      setErrors((prev) => {
+        const next = { ...prev };
+        delete next[screen.id];
+        return next;
+      });
+      await syncMessages();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not apply change';
+      toast.error(message);
+      setErrors((prev) => ({ ...prev, [screen.id]: message }));
+      return false;
+    } finally {
+      finish();
+    }
+  }
+
+  const submit = async () => {
+    const text = prompt.trim();
+    if (busyRef.current || savingTheme || (!text && !(image && scope === 'add'))) return;
+    if (scope === 'add' || screens.length === 0) {
+      const img = image ?? undefined;
+      setPrompt('');
+      setImage(null);
+      await runGenerate(text, img, screens.length > 0);
+      return;
+    }
+    const targets =
+      scope === 'project'
+        ? screens.filter((s) => s.body)
+        : activeScreen?.body
+          ? [activeScreen]
+          : [];
+    if (!text || !targets.length) return;
+    if (!begin(scope === 'project' ? 'Refining every screen' : `Updating ${targets[0].name}`))
+      return;
+    const targetHtml = scope === 'screen' ? selection?.html : undefined;
+    setPrompt('');
+    append('user', `${scope === 'project' ? 'Entire design' : targets[0].name}: ${text}`);
+    setBuilding(new Set(targets.map((s) => s.id)));
+    let failed = false;
+    try {
+      for (const target of targets) {
+        try {
+          replaceScreen(await designApi.editScreen(target.id, text, targetHtml));
+          markDone(target.id);
+          setErrors((prev) => {
+            const next = { ...prev };
+            delete next[target.id];
+            return next;
+          });
+        } catch (error) {
+          failed = true;
+          const message = error instanceof Error ? error.message : 'Could not apply change';
+          setErrors((prev) => ({ ...prev, [target.id]: message }));
+          markDone(target.id);
+          toast.error(message);
+        }
+      }
+      await syncMessages();
+      clearSelection();
+      if (failed) {
+        setPrompt(text);
+        append(
+          'assistant',
+          'Some changes failed. Your previous designs are saved; retry the affected screen.'
+        );
+      }
+    } finally {
+      finish();
+    }
+  };
+  const retry = (screen: DesignScreen) =>
+    runScreenAction(
+      screen,
+      () => designApi.regenerateScreen(screen.id, purposes.current.get(screen.id)),
+      `Building ${screen.name}`
+    );
+  const restore = async (versionId: number) => {
+    if (!activeScreen) return;
+    const ok = await runScreenAction(
+      activeScreen,
+      () => designApi.restoreVersion(activeScreen.id, versionId),
+      `Restoring ${activeScreen.name}`
+    );
+    if (ok) {
+      clearSelection();
+      toast.success('Version restored');
+    }
+  };
+  const updateText = async (text: string) => {
+    if (!selection || !activeScreen?.version_id) return false;
+    const selected = selection;
+    const ok = await runScreenAction(
+      activeScreen,
+      () =>
+        designApi.updateText(selected.screenId, selected.selector, text, activeScreen.version_id!),
+      `Saving text in ${activeScreen.name}`
+    );
+    if (ok) {
+      clearSelection();
+      toast.success('Text updated');
+    }
+    return ok;
+  };
+  const removeScreen = async (screen: DesignScreen) => {
+    if (!begin(`Deleting ${screen.name}`)) return;
+    try {
+      await designApi.deleteScreen(screen.id);
+      setScreens((prev) => {
+        const next = prev.filter((s) => s.id !== screen.id);
+        if (activeId === screen.id) setActiveId(next[0]?.id ?? null);
+        return next;
+      });
+      clearSelection();
+      setErrors((prev) => {
+        const next = { ...prev };
+        delete next[screen.id];
+        return next;
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not delete screen');
+    } finally {
+      finish();
+    }
+  };
+  const commitName = async () => {
+    const name = nameDraft.trim();
+    if (!project || !name || name === project.name) {
+      setNameDraft(project?.name ?? '');
+      return;
+    }
+    if (busyRef.current) return;
+    try {
+      const detail = await designApi.updateProject(projectId, { name });
+      setProject((p) => (p ? { ...p, name: detail.project.name } : p));
+    } catch (error) {
+      setNameDraft(project.name);
+      toast.error(error instanceof Error ? error.message : 'Could not rename design');
+    }
+  };
+
+  // Serialize theme writes so a slow earlier response cannot overwrite a newer palette.
+  const flushTheme = async () => {
+    if (themeWriting.current || !themeQueue.current) return;
+    themeWriting.current = true;
+    try {
+      while (themeQueue.current) {
+        const theme = themeQueue.current;
+        themeQueue.current = null;
+        try {
+          const detail = await designApi.updateProject(projectId, { theme });
+          savedTheme.current = detail.project.theme;
+          if (mounted.current && !themeQueue.current) {
+            setScreens(detail.screens);
+            setProject((p) => (p ? { ...p, theme: detail.project.theme } : p));
+          }
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : 'Could not apply theme');
+          if (mounted.current && !themeQueue.current)
+            setProject((p) => (p && savedTheme.current ? { ...p, theme: savedTheme.current } : p));
+        }
+      }
+    } finally {
+      themeWriting.current = false;
+      if (mounted.current) setSavingTheme(false);
+    }
+  };
+  const changeTheme = (theme: DesignTheme) => {
+    if (busyRef.current) return;
+    setProject((p) => (p ? { ...p, theme } : p));
+    setSavingTheme(true);
+    themeQueue.current = theme;
+    if (themeTimer.current) clearTimeout(themeTimer.current);
+    themeTimer.current = setTimeout(flushTheme, 300);
+  };
+
+  const exportHtml = (screen: DesignScreen) =>
+    downloadScreenHtml(screen.id, screen.name).catch((error) =>
+      toast.error(error instanceof Error ? error.message : 'Export failed')
+    );
+  const exportPng = async (screen: DesignScreen) => {
+    const win = frames.current.get(screen.id)?.contentWindow;
+    if (!win) {
+      toast.info('Open this screen in Canvas or Preview before exporting PNG.');
+      return;
+    }
+    if (captures.current.has(screen.id)) return;
+    try {
+      const url = await new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          captures.current.delete(screen.id);
+          reject(new Error('PNG export timed out. Try downloading HTML.'));
+        }, 30000);
+        captures.current.set(screen.id, {
+          resolve: (url) => {
+            clearTimeout(timer);
+            captures.current.delete(screen.id);
+            resolve(url);
+          },
+          reject: (error) => {
+            clearTimeout(timer);
+            captures.current.delete(screen.id);
+            reject(error);
+          },
+        });
+        win.postMessage({ type: 'capture' }, '*');
+      });
+      downloadDataUrl(url, `${slug(screen.name)}.png`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'PNG export failed');
+    }
+  };
+  const exportZip = async () => {
+    setExporting(true);
+    setExportOpen(false);
+    try {
+      await downloadProjectZip(projectId, project?.name ?? 'design');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
+  const attach = async (file?: File) => {
+    if (!file) return;
+    try {
+      setImage(await readImageFile(file));
+      setScope('add');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not attach reference');
+    }
+  };
+  const setCanvasMode = (next: CanvasMode) => {
+    if (next !== 'canvas' && !activeScreen?.html) {
+      const first = screens.find((s) => s.html);
+      if (first) setActiveId(first.id);
+    }
+    setMode(next);
+  };
+
+  if (loadError)
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
+        <DesignMark size={32} />
+        <h1 className="design-heading text-3xl">Couldn’t open this design</h1>
+        <p role="alert" className="text-sm text-muted-foreground">
+          {loadError}
+        </p>
+        <div className="flex gap-4">
+          <Link href="/design" className="rounded-lg border border-border px-4 py-2 text-sm">
+            All designs
+          </Link>
+          <button
+            onClick={() => setReload((n) => n + 1)}
+            className="rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground"
+          >
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+
+  const placeholder =
+    scope === 'add'
+      ? screens.length
+        ? 'Describe a screen to add…'
+        : 'Describe your idea…'
+      : scope === 'project'
+        ? 'What should change across your design?'
+        : selection
+          ? `What should change in this ${selection.tag}?`
+          : `How should ${activeScreen?.name ?? 'this screen'} change?`;
+  const progressLabel =
+    generating && receivedScreen.current && building.size === 0
+      ? 'Polishing details and adding images'
+      : operation;
+  const previewScale = clamp(
+    (viewportSize.width - 32) / previewWidth,
+    0.1,
+    1
+  );
+
+  return (
+    <div className="flex h-full flex-col">
+      <header className="flex h-[60px] shrink-0 items-center gap-2 border-b border-border bg-background px-3 sm:px-5">
+        <Link
+          href="/design"
+          className="design-icon-button"
+          aria-label="All designs"
+          title="All designs"
+        >
+          <ArrowLeft size={18} />
+        </Link>
+        <button
+          onClick={() => setChatOpen((open) => !open)}
+          className="design-icon-button md:hidden"
+          aria-label={chatOpen ? 'Hide mobile conversation' : 'Show mobile conversation'}
+          aria-expanded={chatOpen}
+        >
+          <MessageSquare size={17} />
+        </button>
+        <span className="hidden text-primary sm:block">
+          <DesignMark size={22} />
+        </span>
+        <ChevronRight size={13} className="hidden text-muted-foreground sm:block" />
+        <input
+          value={nameDraft}
+          onChange={(e) => setNameDraft(e.target.value)}
+          onBlur={commitName}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.currentTarget.blur();
+            if (e.key === 'Escape') {
+              setNameDraft(project?.name ?? '');
+              e.currentTarget.blur();
+            }
+          }}
+          disabled={loading || busy}
+          maxLength={80}
+          aria-label="Project name"
+          placeholder="Loading design…"
+          className="min-w-0 flex-1 rounded-md bg-transparent px-2 py-1.5 text-sm font-medium sm:max-w-[280px]"
+        />
+        <span
+          role="status"
+          className="hidden items-center gap-1.5 text-[11px] text-muted-foreground lg:flex"
+        >
+          {busy || savingTheme ? (
+            <>
+              <Loader2 size={12} className="animate-spin" />
+              {savingTheme ? 'Saving theme' : 'Working'}
+            </>
+          ) : (
+            <>
+              <Check size={13} />
+              Saved
+            </>
+          )}
+        </span>
+        <div className="ml-auto flex items-center gap-1">
+          <AppearanceButton />
+          <button
+            onClick={() => setPanel((p) => (p === 'theme' ? null : 'theme'))}
+            className="design-icon-button"
+            aria-label="Design system"
+            aria-pressed={panel === 'theme'}
+            title="Design system"
+          >
+            <Palette size={17} />
+          </button>
+          <button
+            onClick={() => setPanel((p) => (p === 'history' ? null : 'history'))}
+            className="design-icon-button hidden sm:flex"
+            aria-label="Version history"
+            aria-pressed={panel === 'history'}
+            title="Version history"
+          >
+            <History size={17} />
+          </button>
+          <div ref={exportRef} className="relative">
+            <button
+              disabled={!builtCount || busy || savingTheme || exporting}
+              onClick={() => setExportOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={exportOpen}
+              className="ml-2 flex min-h-9 items-center gap-2 rounded-lg border border-border bg-card px-3 text-xs font-medium disabled:opacity-40"
+            >
+              {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+              <span className="hidden sm:inline">Export</span>
+              <ChevronDown size={12} />
+            </button>
+            {exportOpen && (
+              <div
+                role="menu"
+                className="design-popover absolute right-0 top-11 z-50 w-60 rounded-xl border border-border bg-card p-1.5"
+              >
+                <p className="px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  Take your work with you
+                </p>
+                <button
+                  role="menuitem"
+                  onClick={exportZip}
+                  className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs hover:bg-muted"
+                >
+                  <FolderArchive size={15} />
+                  <div>
+                    All screens (.zip)
+                    <p className="mt-0.5 text-[10px] text-muted-foreground">
+                      HTML files and design tokens
+                    </p>
+                  </div>
+                </button>
+                <div className="my-1 border-t border-border" />
+                <button
+                  role="menuitem"
+                  disabled={!activeScreen?.html}
+                  onClick={() => {
+                    if (activeScreen) exportHtml(activeScreen);
+                    setExportOpen(false);
+                  }}
+                  className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs hover:bg-muted disabled:opacity-40"
+                >
+                  <FileCode2 size={15} />
+                  Selected screen (.html)
+                </button>
+                <button
+                  role="menuitem"
+                  disabled={!activeScreen?.html || mode === 'code'}
+                  onClick={() => {
+                    if (activeScreen) exportPng(activeScreen);
+                    setExportOpen(false);
+                  }}
+                  className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs hover:bg-muted disabled:opacity-40"
+                >
+                  <Download size={15} />
+                  Selected screen (.png)
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </header>
+      <div className="relative flex min-h-0 flex-1">
+        {chatOpen && (
+          <aside
+            className="absolute inset-y-0 left-0 z-20 flex w-[320px] max-w-[90vw] shrink-0 flex-col border-r border-border bg-background shadow-xl md:static md:w-[310px] md:shadow-none xl:w-[340px]"
+            aria-label="Design conversation"
+          >
+            <div
+              className="flex h-12 shrink-0 items-center gap-1 border-b border-border px-4"
+              role="tablist"
+              aria-label="Workspace sidebar"
+            >
+              <button
+                role="tab"
+                aria-selected={sideTab === 'chat'}
+                onClick={() => setSideTab('chat')}
+                className={`flex min-h-8 items-center gap-1.5 rounded-md px-2 text-xs ${sideTab === 'chat' ? 'bg-muted font-medium' : 'text-muted-foreground'}`}
+              >
+                <MessageSquare size={14} />
+                Conversation
+              </button>
+              <button
+                role="tab"
+                aria-selected={sideTab === 'screens'}
+                onClick={() => setSideTab('screens')}
+                className={`flex min-h-8 items-center gap-1.5 rounded-md px-2 text-xs ${sideTab === 'screens' ? 'bg-muted font-medium' : 'text-muted-foreground'}`}
+              >
+                <LayoutGrid size={14} />
+                Screens <span className="text-[10px]">{screens.length}</span>
+              </button>
+              <button
+                onClick={() => setChatOpen(false)}
+                aria-label="Hide conversation"
+                className="design-icon-button ml-auto !size-7"
+              >
+                <PanelLeftClose size={16} />
+              </button>
+            </div>
+            {sideTab === 'chat' ? (
+              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6" role="tabpanel">
+                <div className="mb-6">
+                  <div className="mb-3 flex items-center gap-2 text-xs font-medium">
+                    <span className="text-primary">
+                      <DesignMark size={18} />
+                    </span>
+                    Pragna Design
+                  </div>
+                  <p className="text-sm leading-6">
+                    A space to turn your idea into something you can see, shape, and share.
+                  </p>
+                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                    Describe changes here, select an element for a precise edit, or explore your
+                    screens in Preview.
+                  </p>
+                </div>
+                <div className="space-y-5">
+                  {messages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`design-message ${message.role === 'user' ? 'ml-3 rounded-xl bg-muted px-4 py-3' : 'pr-1'}`}
+                    >
+                      {message.role === 'assistant' && (
+                        <div className="mb-2 flex items-center gap-1.5 text-xs font-medium">
+                          <span className="text-primary">
+                            <DesignMark size={14} />
+                          </span>
+                          Pragna
+                        </div>
+                      )}
+                      <p className="whitespace-pre-wrap break-words text-xs leading-[1.85]">
+                        {message.content}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                {busy && (
+                  <div className="mt-5 rounded-xl border border-border bg-card p-4" role="status">
+                    <div className="flex items-center gap-2 text-xs font-medium">
+                      <Loader2 size={14} className="animate-spin text-primary" />
+                      <span>{progressLabel}</span>
+                    </div>
+                    <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+                      {generating
+                        ? 'Thoughtful screens take a few minutes. You can explore completed screens while the rest take shape.'
+                        : 'Your existing design stays visible while this change runs.'}
+                    </p>
+                    <div className="mt-3 flex items-center justify-between text-[10px] text-muted-foreground">
+                      <span>
+                        {generating ? `${builtCount} screens on canvas` : 'Saving a new version'}
+                      </span>
+                      <span className="tabular-nums">
+                        {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}
+                      </span>
+                    </div>
+                    {generating && (
+                      <button
+                        onClick={() => {
+                          setStopping(true);
+                          abortRef.current?.abort();
+                        }}
+                        disabled={stopping}
+                        className="mt-3 flex min-h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-xs disabled:opacity-40"
+                      >
+                        <Square size={10} />
+                        {stopping ? 'Stopping…' : 'Stop generation'}
+                      </button>
+                    )}
+                  </div>
+                )}
+                <div ref={chatEnd} />
+              </div>
+            ) : (
+              <div className="min-h-0 flex-1 overflow-y-auto p-4" role="tabpanel">
+                <p className="mb-4 text-xs text-muted-foreground">
+                  {screens.length} screens · {builtCount} ready
+                </p>
+                <div className="space-y-2">
+                  {screens.map((screen, i) => (
+                    <button
+                      key={screen.id}
+                      onClick={() => {
+                        activate(screen, true);
+                        if (window.innerWidth < 768) setChatOpen(false);
+                      }}
+                      aria-pressed={activeId === screen.id}
+                      className={`flex min-h-14 w-full items-center gap-3 rounded-xl border p-3 text-left ${activeId === screen.id ? 'border-gold-500/40 bg-[var(--design-selected)]' : 'border-border bg-card hover:bg-muted'}`}
+                    >
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-xs text-muted-foreground">
+                        {building.has(screen.id) ? (
+                          <Loader2 size={13} className="animate-spin" />
+                        ) : (
+                          String(i + 1).padStart(2, '0')
+                        )}
+                      </span>
+                      <div className="min-w-0">
+                        <p className="truncate text-xs font-medium">{screen.name}</p>
+                        <p className="mt-1 text-[10px] text-muted-foreground">
+                          {building.has(screen.id)
+                            ? 'Building'
+                            : screen.html
+                              ? 'Ready to refine'
+                              : errors[screen.id]
+                                ? 'Needs a retry'
+                                : 'Not built yet'}
+                        </p>
+                      </div>
+                      <ChevronRight size={13} className="ml-auto shrink-0 text-muted-foreground" />
+                    </button>
+                  ))}
+                </div>
+                <button
+                  disabled={busy}
+                  onClick={() => {
+                    setScope('add');
+                    setSideTab('chat');
+                    promptRef.current?.focus();
+                  }}
+                  className="mt-3 flex min-h-10 w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border text-xs text-muted-foreground hover:bg-muted disabled:opacity-40"
+                >
+                  <Plus size={14} />
+                  Add a screen
+                </button>
+              </div>
+            )}
+            <div className="shrink-0 border-t border-border p-3">
+              <label className="mb-2 flex items-center gap-2 px-1 text-[11px] text-muted-foreground">
+                Apply to
+                <select
+                  value={scope}
+                  disabled={busy || savingTheme}
+                  onChange={(e) => {
+                    setScope(e.target.value as Scope);
+                    clearSelection();
+                  }}
+                  aria-label="Edit scope"
+                  className="min-w-0 flex-1 rounded-md border-0 bg-transparent py-1 text-xs font-medium text-foreground"
+                >
+                  <option value="add">{screens.length ? 'A new screen' : 'New design'}</option>
+                  <option value="screen" disabled={!activeScreen?.body}>
+                    {screens.length === 1
+                      ? 'Current design'
+                      : `Selected screen${activeScreen ? ` · ${activeScreen.name}` : ''}`}
+                  </option>
+                  {screens.length > 1 && (
+                    <option value="project" disabled={!editableScreens.length}>
+                      Entire design
+                    </option>
+                  )}
+                </select>
+              </label>
+              {selection && scope === 'screen' && (
+                <div className="mb-2 flex items-center gap-1.5 rounded-md bg-[var(--design-selected)] px-2 py-1.5 text-[10px]">
+                  <MousePointer2 size={12} />
+                  <span className="truncate">
+                    &lt;{selection.tag}&gt; · {activeScreen?.name}
+                  </span>
+                  <button
+                    onClick={clearSelection}
+                    className="ml-auto rounded p-1"
+                    aria-label="Clear element selection"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
+              {image && scope === 'add' && (
+                <div className="relative mb-2 inline-block">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={image}
+                    alt="Design reference"
+                    className="h-16 rounded-lg border border-border"
+                  />
+                  <button
+                    onClick={() => setImage(null)}
+                    aria-label="Remove reference"
+                    className="absolute -right-1 -top-1 rounded-full border border-border bg-card p-1"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
+              <div className="design-composer rounded-xl border border-border bg-card p-2.5">
+                <textarea
+                  ref={promptRef}
+                  value={prompt}
+                  onChange={(e) => {
+                    setPrompt(e.target.value);
+                    e.currentTarget.style.height = 'auto';
+                    e.currentTarget.style.height = `${Math.min(e.currentTarget.scrollHeight, 160)}px`;
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      submit();
+                    }
+                  }}
+                  onPaste={(e) => {
+                    if (scope === 'add') {
+                      const file = Array.from(e.clipboardData.files).find((f) =>
+                        f.type.startsWith('image/')
+                      );
+                      if (file) {
+                        e.preventDefault();
+                        attach(file);
+                      }
+                    }
+                  }}
+                  rows={3}
+                  maxLength={scope === 'add' ? 4000 : 2000}
+                  placeholder={placeholder}
+                  aria-label="Design prompt"
+                  className="max-h-40 min-h-20 w-full resize-none bg-transparent px-1 text-xs leading-6 placeholder:text-muted-foreground focus-visible:!outline-none"
+                />
+                <div className="mt-1 flex items-center">
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      attach(e.target.files?.[0]);
+                      e.target.value = '';
+                    }}
+                  />
+                  {scope === 'add' ? (
+                    <button
+                      disabled={busy}
+                      onClick={() => fileRef.current?.click()}
+                      className="design-icon-button !size-8"
+                      aria-label="Attach reference image"
+                    >
+                      <ImagePlus size={16} />
+                    </button>
+                  ) : (
+                    <span className="pl-1 text-[10px] text-muted-foreground">
+                      Shift + Enter for a new line
+                    </span>
+                  )}
+                  <button
+                    disabled={
+                      loading ||
+                      busy ||
+                      savingTheme ||
+                      (!prompt.trim() && !(image && scope === 'add')) ||
+                      (scope === 'screen' && !activeScreen?.body)
+                    }
+                    onClick={submit}
+                    aria-label="Send design request"
+                    className="ml-auto flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-40"
+                  >
+                    <ArrowUp size={16} />
+                  </button>
+                </div>
+              </div>
+              <p className="mt-2 text-center text-[10px] text-muted-foreground">
+                {scope === 'add'
+                  ? screens.length
+                    ? 'Build another screen from your brief'
+                    : 'Build one complete design from your brief'
+                  : scope === 'project'
+                    ? 'Changes apply to every completed screen'
+                    : screens.length === 1
+                      ? 'Refine your design with each message'
+                      : 'Changes apply only to your selected screen'}
+              </p>
+            </div>
+          </aside>
+        )}
+        <div className="relative flex min-w-0 flex-1 flex-col">
+          <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-3">
+            {!chatOpen && (
+              <button
+                onClick={() => setChatOpen(true)}
+                aria-label="Show conversation"
+                className="design-icon-button"
+              >
+                <PanelLeftOpen size={16} />
+              </button>
+            )}
+            <div className="flex gap-0.5 rounded-lg bg-muted p-0.5" aria-label="Workspace view">
+              {(
+                [
+                  { value: 'canvas', label: 'Canvas', Icon: LayoutGrid },
+                  { value: 'preview', label: 'Preview', Icon: Monitor },
+                  { value: 'code', label: 'Code', Icon: Code2 },
+                ] as const
+              ).map(({ value, label, Icon }) => (
+                <button
+                  key={value}
+                  onClick={() => setCanvasMode(value)}
+                  aria-pressed={mode === value}
+                  disabled={value !== 'canvas' && !builtCount}
+                  className={`flex min-h-8 items-center gap-1.5 rounded-md px-2.5 text-xs disabled:opacity-40 ${mode === value ? 'bg-card shadow-sm' : 'text-muted-foreground'}`}
+                >
+                  <Icon size={13} />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+            {mode === 'canvas' ? (
+              <div className="ml-auto flex items-center gap-0.5">
+                <button
+                  className="design-icon-button !size-8"
+                  onClick={() => setTool('select')}
+                  aria-label="Select elements"
+                  aria-pressed={tool === 'select'}
+                  title="Select elements (V)"
+                >
+                  <MousePointer2 size={16} />
+                </button>
+                <button
+                  className="design-icon-button !size-8"
+                  onClick={() => setTool('hand')}
+                  aria-label="Pan canvas"
+                  aria-pressed={tool === 'hand'}
+                  title="Pan canvas (H)"
+                >
+                  <Hand size={16} />
+                </button>
+                <span className="mx-1 h-5 border-r border-border" />
+                <button
+                  className="design-icon-button !size-8"
+                  onClick={() => setPanel((p) => (p === 'inspect' ? null : 'inspect'))}
+                  aria-label="Inspect selected element"
+                  aria-pressed={panel === 'inspect'}
+                  title="Inspect"
+                >
+                  <Type size={16} />
+                </button>
+              </div>
+            ) : (
+              <div className="ml-auto flex items-center gap-2">
+                {screens.filter((screen) => screen.html).length > 1 && (
+                  <select
+                    aria-label="Preview screen"
+                    value={activeId ?? ''}
+                    onChange={(e) => {
+                      setActiveId(Number(e.target.value));
+                      clearSelection();
+                    }}
+                    className="max-w-36 rounded-md border border-border bg-card px-2 py-1.5 text-xs"
+                  >
+                    {screens
+                      .filter((s) => s.html)
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                  </select>
+                )}
+                {mode === 'preview' && (
+                  <div className="hidden items-center gap-0.5 lg:flex">
+                    {(
+                      [
+                        { width: 1280, label: 'Desktop preview', Icon: Monitor },
+                        { width: 768, label: 'Tablet preview', Icon: Tablet },
+                        { width: 390, label: 'Mobile preview', Icon: Smartphone },
+                      ] as const
+                    ).map(({ width, label, Icon }) => (
+                      <button
+                        key={width}
+                        className="design-icon-button !size-8"
+                        aria-label={label}
+                        aria-pressed={previewWidth === width}
+                        onClick={() => setPreviewWidth(width)}
+                      >
+                        <Icon size={15} />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          <div
+            ref={viewportRef}
+            data-pan="1"
+            onPointerDown={(e) => {
+              if (mode !== 'canvas' || !(e.target as HTMLElement).dataset.pan) return;
+              drag.current = { x: e.clientX, y: e.clientY };
+              e.currentTarget.setPointerCapture(e.pointerId);
+            }}
+            onPointerMove={(e) => {
+              if (!drag.current) return;
+              const dx = e.clientX - drag.current.x,
+                dy = e.clientY - drag.current.y;
+              drag.current = { x: e.clientX, y: e.clientY };
+              setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+            }}
+            onPointerUp={() => {
+              drag.current = null;
+            }}
+            onPointerCancel={() => {
+              drag.current = null;
+            }}
+            className={`relative min-h-0 flex-1 overflow-hidden ${mode === 'canvas' ? 'design-canvas touch-none' : 'bg-background'}`}
+          >
+            {loading ? (
+              <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                <Loader2 size={18} className="animate-spin" />
+                Opening your workspace…
+              </div>
+            ) : mode === 'canvas' ? (
+              <>
+                <div
+                  data-pan="1"
+                  className="absolute left-0 top-0"
+                  style={{
+                    transform: `translate(${view.x}px,${view.y}px) scale(${view.scale})`,
+                    transformOrigin: '0 0',
+                  }}
+                >
+                  {screens.map((screen, i) => (
+                    <div
+                      key={screen.id}
+                      className="absolute"
+                      style={{
+                        left: (i % COLUMNS[device]) * (frame.width + GAP),
+                        top: Math.floor(i / COLUMNS[device]) * (frame.height + FRAME_HEADER + GAP),
+                      }}
+                    >
+                      <ScreenFrame
+                        screen={screen}
+                        width={frame.width}
+                        height={frame.height}
+                        background={project?.theme.background ?? 'transparent'}
+                        building={building.has(screen.id)}
+                        error={errors[screen.id]}
+                        active={activeId === screen.id}
+                        busy={busy || savingTheme}
+                        registerFrame={registerFrame}
+                        onReady={sendMode}
+                        onActivate={() => activate(screen)}
+                        onRetry={() => retry(screen)}
+                        onExportHtml={() => exportHtml(screen)}
+                        onExportPng={() => exportPng(screen)}
+                        onHistory={() => {
+                          activate(screen);
+                          setPanel('history');
+                        }}
+                        onDelete={() => removeScreen(screen)}
+                      />
+                      {tool === 'hand' && (
+                        <div
+                          data-pan="1"
+                          className="absolute inset-x-0 bottom-0 cursor-grab active:cursor-grabbing"
+                          style={{ height: frame.height }}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {!screens.length && (
+                  <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-8 text-center">
+                    <span className="mb-5 text-muted-foreground">
+                      <LayoutGrid size={38} strokeWidth={1} />
+                    </span>
+                    <h2 className="design-heading text-3xl">A blank canvas. A good beginning.</h2>
+                    <p className="mt-3 max-w-sm text-xs leading-6 text-muted-foreground">
+                      {generating
+                        ? 'Pragna is planning your screens. They’ll take shape here.'
+                        : 'Tell Pragna what you have in mind. Your screens will appear here, ready to refine.'}
+                    </p>
+                  </div>
+                )}
+                <div className="absolute bottom-4 left-4 flex items-center rounded-xl border border-border bg-card p-0.5 shadow-sm">
+                  <button
+                    onClick={() => zoomBy(1 / 1.25)}
+                    className="design-icon-button !size-8"
+                    aria-label="Zoom out"
+                  >
+                    <Minus size={14} />
+                  </button>
+                  <span className="w-11 text-center text-[11px] tabular-nums">
+                    {Math.round(view.scale * 100)}%
+                  </span>
+                  <button
+                    onClick={() => zoomBy(1.25)}
+                    className="design-icon-button !size-8"
+                    aria-label="Zoom in"
+                  >
+                    <Plus size={14} />
+                  </button>
+                  <span className="mx-1 h-4 border-l border-border" />
+                  <button
+                    onClick={() => fitView(screens.length, device)}
+                    className="flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-[11px] hover:bg-muted"
+                    title="Fit all screens (0)"
+                  >
+                    <Maximize2 size={13} />
+                    Fit
+                  </button>
+                  {activeScreen && (
+                    <button
+                      onClick={() => focusScreen(activeScreen)}
+                      className="hidden min-h-8 rounded-lg px-2 text-[11px] hover:bg-muted xl:block"
+                    >
+                      Focus screen
+                    </button>
+                  )}
+                </div>
+                <div className="pointer-events-none absolute bottom-5 right-5 hidden text-[10px] text-muted-foreground xl:block">
+                  {tool === 'hand' ? 'Drag to pan' : 'Click to select'} · Ctrl / ⌘ + scroll to zoom
+                </div>
+              </>
+            ) : mode === 'preview' && activeScreen?.html ? (
+              <>
+                <div className="absolute inset-0 overflow-auto">
+                  <div
+                    className="relative mx-auto my-4"
+                    style={{
+                      width: previewWidth * previewScale,
+                      height: frame.height * previewScale,
+                    }}
+                  >
+                    <iframe
+                      key={activeScreen.id}
+                      ref={(el) => registerFrame(activeScreen.id, el)}
+                      onLoad={() => sendMode(activeScreen.id)}
+                      title={`${activeScreen.name} interactive preview`}
+                      srcDoc={activeScreen.html}
+                      sandbox="allow-scripts"
+                      className="absolute left-0 top-0 rounded-lg border border-border bg-card shadow-xl"
+                      style={{
+                        width: previewWidth,
+                        height: frame.height,
+                        transform: `scale(${Math.max(0.1, previewScale)})`,
+                        transformOrigin: 'top left',
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="pointer-events-none absolute inset-x-0 bottom-4 text-center text-[10px] text-muted-foreground">
+                  {previewWidth}px viewport · Scroll and interact with your design
+                </div>
+              </>
+            ) : mode === 'code' && activeScreen ? (
+              <div className="flex h-full flex-col bg-card">
+                <div className="flex min-h-12 items-center justify-between border-b border-border px-5 text-xs">
+                  <span className="font-mono text-muted-foreground">
+                    {slug(activeScreen.name)}.html
+                  </span>
+                  <button
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(activeScreen.body ?? '');
+                        toast.success('HTML copied');
+                      } catch {
+                        toast.error('Could not copy HTML');
+                      }
+                    }}
+                    className="rounded-md border border-border px-3 py-1.5"
+                  >
+                    Copy HTML
+                  </button>
+                </div>
+                <pre className="min-h-0 flex-1 overflow-auto p-5 text-xs leading-6">
+                  <code>{activeScreen.body}</code>
+                </pre>
+              </div>
+            ) : (
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                Choose a completed screen to preview.
+              </div>
+            )}
+          </div>
+        </div>
+        {panel && project && (
+          <SidePanel
+            tab={panel}
+            onTab={setPanel}
+            onClose={() => setPanel(null)}
+            theme={project.theme}
+            onTheme={changeTheme}
+            screen={activeScreen}
+            historyKey={historyKey}
+            onRestore={restore}
+            selection={selection}
+            onText={updateText}
+            busy={busy}
+            savingTheme={savingTheme}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function zoomAround(view: View, x: number, y: number, nextScale: number): View {
+  const scale = clamp(nextScale, MIN_SCALE, MAX_SCALE),
+    factor = scale / view.scale;
+  return { scale, x: x - (x - view.x) * factor, y: y - (y - view.y) * factor };
+}

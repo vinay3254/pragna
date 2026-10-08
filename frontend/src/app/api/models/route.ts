@@ -5,7 +5,6 @@ export const runtime = 'nodejs';
 import { SANSKRIT_MODELS } from '@/lib/modelDisplayNames';
 
 export async function GET() {
-  const hasOpenRouterKey = Boolean(process.env.OPENROUTER_API_KEY);
   const hasAnthropicKey = Boolean(process.env.ANTHROPIC_API_KEY);
   const hasStabilityKey = Boolean(process.env.STABILITY_API_KEY);
 
@@ -26,7 +25,6 @@ export async function GET() {
   return NextResponse.json({
     models,
     keys: {
-      openrouter: hasOpenRouterKey,
       anthropic: hasAnthropicKey,
       stability: hasStabilityKey,
     },

@@ -96,7 +96,7 @@ export default function SkillsSettings() {
             Agent Skills Engine
           </h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Manage custom capabilities, prompt workflows, and specialized domain knowledge for Argus.
+            Manage custom capabilities, prompt workflows, and specialized domain knowledge for Pragna.
           </p>
         </div>
         <button
@@ -135,7 +135,7 @@ export default function SkillsSettings() {
               <input
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="What this skill enables Argus to do..."
+                placeholder="What this skill enables Pragna to do..."
                 className="w-full mt-1 px-3 py-2 bg-muted border border-border rounded-lg text-sm outline-none focus:border-primary"
               />
             </div>
@@ -186,7 +186,7 @@ export default function SkillsSettings() {
           <div className="p-8 border border-dashed border-border rounded-xl text-center text-muted-foreground">
             <BookOpen size={32} className="mx-auto mb-2 opacity-50" />
             <p className="font-medium text-foreground">No custom skills created yet</p>
-            <p className="text-sm">Click "Create New Skill" to define custom workflows for Argus.</p>
+            <p className="text-sm">Click "Create New Skill" to define custom workflows for Pragna.</p>
           </div>
         ) : (
           skills.map((skill) => (

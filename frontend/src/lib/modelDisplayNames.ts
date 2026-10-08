@@ -9,7 +9,7 @@
  * - "Manas" (मनस् — mind/intellect) → Google Gemma 4 31B
  * - "Bṛhat" (बृहत् — vast/immense) → Nvidia Nemotron 120B
  *
- * API calls, OpenRouter slugs, and model IDs stay 100% UNCHANGED.
+ * API calls and model IDs stay 100% UNCHANGED.
  */
 
 export interface SanskritModelConfig {
@@ -120,6 +120,16 @@ export const SANSKRIT_MODELS: SanskritModelConfig[] = [
     provider: 'nvidia',
   },
 ];
+
+/** Hide the old six-option menu without suppressing other model lists. */
+export function isLegacyModelMenu(identifiers: string[]): boolean {
+  return identifiers.length > 0 && identifiers.every((identifier) =>
+    SANSKRIT_MODELS.some((model) =>
+      [model.id, model.displayName, model.asciiFallback, model.rawName]
+        .some((value) => value.toLowerCase() === identifier.trim().toLowerCase())
+    )
+  );
+}
 
 /**
  * Normalizes an arbitrary model string (ID, display name, ASCII fallback, or raw name)

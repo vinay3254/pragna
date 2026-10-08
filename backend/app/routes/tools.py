@@ -151,7 +151,7 @@ async def post_kanban_task(
 @router.get("/api/tools/scheduled")
 async def get_scheduled_tasks(request: Request, current_user: dict = Depends(get_optional_current_user)):
     from app import cron_service
-    jobs = cron_service.list_scheduled_tasks(request.app.state.conn)
+    jobs = cron_service.list_scheduled_tasks(request.app.state.conn, user_id=current_user["id"])
     return {"jobs": jobs}
 
 
@@ -162,6 +162,21 @@ class ScheduledTaskRequest(BaseModel):
     schedule: Optional[str] = None
     job_id: Optional[int] = None
     conversation_id: Optional[str] = None
+
+
+class SchedulePreviewRequest(BaseModel):
+    text: str
+    timezone: Optional[str] = None
+
+
+@router.post("/api/tools/scheduled/preview")
+async def preview_schedule(body: SchedulePreviewRequest, current_user: dict = Depends(get_optional_current_user)):
+    """Parse a natural-language schedule so the UI can show "Next run" before saving."""
+    from app import cron_service
+    parsed = cron_service.parse_schedule_text(body.text, body.timezone)
+    if not parsed:
+        return {"found": False}
+    return {"found": True, **parsed}
 
 
 @router.post("/api/scheduled-tasks")
@@ -175,20 +190,21 @@ async def post_scheduled_task(
         if not body.prompt or not body.schedule:
             raise HTTPException(status_code=400, detail="prompt and schedule are required")
         return cron_service.schedule_task(
-            conn, body.prompt, body.schedule, conversation_id=body.conversation_id, title=body.title
+            conn, body.prompt, body.schedule, conversation_id=body.conversation_id, title=body.title,
+            user_id=current_user["id"],
         )
     if body.action in ("delete", "cancel"):
         if not body.job_id:
             raise HTTPException(status_code=400, detail="job_id is required")
-        return cron_service.cancel_scheduled_task(conn, body.job_id)
+        return cron_service.cancel_scheduled_task(conn, body.job_id, user_id=current_user["id"])
     if body.action == "toggle":
         if not body.job_id:
             raise HTTPException(status_code=400, detail="job_id is required")
-        return cron_service.toggle_scheduled_task(conn, body.job_id)
+        return cron_service.toggle_scheduled_task(conn, body.job_id, user_id=current_user["id"])
     if body.action == "run":
         if not body.job_id:
             raise HTTPException(status_code=400, detail="job_id is required")
-        return await cron_service.run_scheduled_task_now(conn, body.job_id)
+        return await cron_service.run_scheduled_task_now(conn, body.job_id, user_id=current_user["id"])
     raise HTTPException(status_code=400, detail=f"Unknown action '{body.action}'")
 
 

@@ -1,1 +1,1 @@
-The mimir project's frontend uses React with Vite and Tailwind CSS v4.
+The pragna project's frontend uses React with Vite and Tailwind CSS v4.

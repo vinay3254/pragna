@@ -1,11 +1,12 @@
 'use client';
 
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { Copy, ThumbsUp, ThumbsDown, RotateCcw, Check, Download, FileText, Volume2, Square, Loader2, ChevronDown } from 'lucide-react';
+import { Copy, Pencil, Share2, ThumbsUp, ThumbsDown, RotateCcw, Check, Download, FileText, Volume2, Square, Loader2, ChevronDown } from 'lucide-react';
+import { toast } from 'sonner';
 import { Message } from '../types/chat';
 import MarkdownRenderer from './MarkdownRenderer';
 import AppLogo from '@/components/ui/AppLogo';
-import { synthesizeSpeech } from '@/lib/api';
+import { getAuthToken, synthesizeSpeech } from '@/lib/api';
 
 interface MessageBubbleProps {
   message: Message;
@@ -16,6 +17,8 @@ interface MessageBubbleProps {
   selectedLanguage?: string;
   onOpenArtifact?: (title: string, content: string, language?: string) => void;
   onRetry?: () => void;
+  onEdit?: (content: string) => void;
+  canEdit?: boolean;
 }
 
 function formatExactTimestamp(timestamp: string): string {
@@ -58,8 +61,13 @@ export default function MessageBubble({
   selectedLanguage,
   onOpenArtifact,
   onRetry,
+  onEdit,
+  canEdit = true,
 }: MessageBubbleProps) {
   const [copied, setCopied] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(message.content);
+  const [isSharing, setIsSharing] = useState(false);
   const [thumbState, setThumbState] = useState<'up' | 'down' | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isLoadingSpeech, setIsLoadingSpeech] = useState(false);
@@ -114,15 +122,18 @@ export default function MessageBubble({
   const exactTimestamp = formatExactTimestamp(message.timestamp);
   const inlineTime = formatInlineTime(message.timestamp);
 
-  // Detect any referenced or generated document files (.docx, .pdf, .xlsx, .csv, .pptx)
+  // Detect generated document files (.docx, .pdf, .xlsx, .csv, .pptx). Only real
+  // download links count -- a bare filename (e.g. an uploaded file the reply
+  // mentions) is not something we can serve.
   const detectedDocFiles = useMemo(() => {
     if (message.role !== 'assistant' || !message.content) return [];
-    const regex = /(?:Download Link:\s*\[?|File Name:\s*`?|generated_docs\/|\b)([a-zA-Z0-9_\- ]+\.(docx|pdf|xlsx|csv|pptx))\b/gi;
+    const regex = /(?:\/api\/documents\/download\/|generated_docs\/)([a-zA-Z0-9_\-. %()]+?\.(docx|pdf|xlsx|csv|pptx))\b/gi;
     const matches: { filename: string; ext: string }[] = [];
     const seen = new Set<string>();
     let m;
     while ((m = regex.exec(message.content)) !== null) {
-      const clean = m[1].trim();
+      let clean = m[1].trim();
+      try { clean = decodeURIComponent(clean); } catch {}
       const ext = m[2].toLowerCase();
       if (!seen.has(clean) && clean.length > 4) {
         seen.add(clean);
@@ -133,9 +144,66 @@ export default function MessageBubble({
   }, [message.content, message.role]);
 
   const copyMessage = async () => {
-    await navigator.clipboard.writeText(message.content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Could not copy this message.');
+    }
+  };
+
+  const sharePrompt = async () => {
+    if (isSharing) return;
+    setIsSharing(true);
+    try {
+      let url: string | undefined;
+      try {
+        const token = getAuthToken();
+        const response = await fetch('/api/chat/0/share', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            title: 'Shared prompt',
+            messages: [{ role: 'user', content: message.content, images: message.images, files: message.files }],
+          }),
+          signal: AbortSignal.timeout(10000),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.share_url) url = new URL(data.share_url, window.location.origin).href;
+        }
+      } catch {
+        // Prompt text can still be shared when the link service is unavailable.
+      }
+      if (!url && !message.content) {
+        toast.error('Could not create a share link for this attachment. Try again.');
+        return;
+      }
+      if (navigator.share) {
+        try {
+          await navigator.share(url ? { title: 'Shared prompt', url } : { title: 'Shared prompt', text: message.content });
+          return;
+        } catch (error) {
+          if (error instanceof Error && error.name === 'AbortError') return;
+        }
+      }
+      await navigator.clipboard.writeText(url || message.content);
+      toast.success(url ? 'Prompt share link copied' : 'Prompt copied for sharing');
+    } catch {
+      toast.error('Could not share this prompt.');
+    } finally {
+      setIsSharing(false);
+    }
+  };
+
+  const saveEdit = () => {
+    if (!canEdit || !onEdit || (!editValue.trim() && !message.images?.length && !message.files?.length)) return;
+    if (editValue !== message.content) onEdit(editValue);
+    setEditing(false);
   };
 
   const speakWithBrowser = (cleanText: string, targetLang: string) => {
@@ -345,8 +413,8 @@ export default function MessageBubble({
 
       {message.role === 'user' ? (
         <div className="flex justify-end message-enter group/msg">
-          <div className="flex flex-col items-end gap-0.5">
-            <div className="relative max-w-[85%]">
+          <div className={`flex flex-col items-end gap-0.5 max-w-[85%] ${editing ? 'w-full' : ''}`}>
+            <div className="relative inline-block max-w-full">
               {/* Tooltip */}
               {exactTimestamp && (
                 <div className="absolute -top-7 right-0 z-10 pointer-events-none opacity-0 group-hover/msg:opacity-100 transition-opacity duration-150">
@@ -355,7 +423,7 @@ export default function MessageBubble({
                   </div>
                 </div>
               )}
-              <div className="px-4 py-2.5 rounded-2xl user-bubble-bg text-foreground text-sm leading-relaxed border border-border/50 shadow-sm">
+              <div className="px-4 py-2.5 text-foreground text-sm leading-relaxed">
                 {message.images && message.images.length > 0 && (
                   <div className="flex flex-wrap gap-2 mb-2">
                     {message.images.map((src, i) => (
@@ -369,12 +437,52 @@ export default function MessageBubble({
                     ))}
                   </div>
                 )}
-                {message.content && <p className="whitespace-pre-wrap">{message.content}</p>}
+                {message.files && message.files.length > 0 && (
+                  <div className="flex flex-wrap justify-end gap-2 mb-2">
+                    {message.files.map((name) => (
+                      <div key={name} className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/40 px-3 py-2 text-xs">
+                        <FileText size={14} className="text-primary shrink-0" />
+                        <span className="truncate max-w-[220px]">{name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {editing ? (
+                  <div className="w-full space-y-2">
+                    <textarea
+                      autoFocus
+                      aria-label="Edit prompt"
+                      value={editValue}
+                      onChange={event => setEditValue(event.target.value)}
+                      onKeyDown={event => {
+                        if (event.key === 'Escape') setEditing(false);
+                        if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                          event.preventDefault();
+                          saveEdit();
+                        }
+                      }}
+                      rows={3}
+                      disabled={!canEdit}
+                      className="w-full min-w-0 sm:min-w-[320px] resize-y rounded-xl border border-border bg-card px-3 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+                    />
+                    <p className="text-xs text-muted-foreground">Sending an edit replaces replies after this prompt.</p>
+                    <div className="flex justify-end gap-2">
+                      <button type="button" onClick={() => setEditing(false)} className="rounded-lg px-3 py-1.5 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary">Cancel</button>
+                      <button type="button" onClick={saveEdit} disabled={!canEdit || (!editValue.trim() && !message.images?.length && !message.files?.length)} className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-primary">Save &amp; send</button>
+                    </div>
+                  </div>
+                ) : message.content && <p className="whitespace-pre-wrap">{message.content}</p>}
               </div>
             </div>
-            {/* Inline time */}
-            {inlineTime && !message.isStreaming && (
-              <span className="text-[10px] text-muted-foreground/40 pr-1 font-mono-data tracking-tight leading-none mt-0.5">{inlineTime}</span>
+            {!editing && (
+              <div className="flex items-center justify-end gap-1 mt-0.5 pr-1">
+                <div className="flex items-center gap-0.5 opacity-40 group-hover/msg:opacity-100 focus-within:opacity-100 transition-opacity duration-200">
+                  <ActionButton icon={copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />} label={copied ? 'Copied!' : 'Copy prompt'} onClick={copyMessage} disabled={!message.content} />
+                  {onEdit && <ActionButton icon={<Pencil size={12} />} label="Edit prompt" onClick={() => { setEditValue(message.content); setEditing(true); }} disabled={!canEdit} />}
+                  <ActionButton icon={isSharing ? <Loader2 size={12} className="animate-spin" /> : <Share2 size={12} />} label="Share prompt" onClick={sharePrompt} disabled={isSharing} />
+                </div>
+                {inlineTime && !message.isStreaming && <span className="ml-1 text-[10px] text-muted-foreground/40 font-mono-data tracking-tight leading-none">{inlineTime}</span>}
+              </div>
             )}
           </div>
         </div>
@@ -549,19 +657,22 @@ export default function MessageBubble({
 }
 
 function ActionButton({
-  icon, label, onClick, active = false
+  icon, label, onClick, active = false, disabled = false
 }: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
   active?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
+      type="button"
+      disabled={disabled}
       title={label}
       className={`
-        p-1 rounded-md transition-all duration-150 active:scale-90
+        p-1 rounded-md transition-all duration-150 active:scale-90 disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary
         ${active
           ? 'text-primary bg-primary/10' : 'text-muted-foreground/70 hover:text-foreground hover:bg-muted/60'
         }

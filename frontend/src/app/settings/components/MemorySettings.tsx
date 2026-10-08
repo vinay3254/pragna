@@ -44,7 +44,7 @@ export default function MemorySettings() {
             Persistent Personalized Memory
           </h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Durable facts and preferences mimir has learned about you across conversations.
+            Durable facts and preferences Pragna has learned about you across conversations.
           </p>
         </div>
         <button
@@ -61,7 +61,7 @@ export default function MemorySettings() {
         <div className="py-12 text-center text-sm text-muted-foreground">Loading memories…</div>
       ) : memories.length === 0 ? (
         <div className="py-12 text-center text-sm text-muted-foreground bg-muted/20 border border-dashed border-border rounded-xl">
-          No personalized memories saved yet. Talk to mimir and state your preferences!
+          No personalized memories saved yet. Talk to Pragna and state your preferences!
         </div>
       ) : (
         <div className="space-y-2.5">

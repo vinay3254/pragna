@@ -8,20 +8,20 @@ import { useChat } from '@/context/ChatContext';
 import { useAuth } from '@/context/AuthContext';
 import {
   MessageSquare,
-  Folder,
   ChevronRight,
   PanelLeftClose,
   Plus,
   Search,
   Clock,
+  Palette,
   Trash2,
   X,
 } from 'lucide-react';
 import UserProfileMenu from '@/components/UserProfileMenu';
 
 const navItems = [
-  { key: 'nav-history', href: '/chat-history-folders', icon: Folder, label: 'Folders & Projects' },
   { key: 'nav-tasks', href: '/tasks', icon: Clock, label: 'Scheduled' },
+  { key: 'nav-design', href: '/design', icon: Palette, label: 'Design' },
 ];
 
 interface SidebarProps {
@@ -50,11 +50,11 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
       {/* Header */}
       <div className={`flex items-center px-3 py-3 shrink-0 ${collapsed ? 'justify-center' : 'justify-between'}`}>
         {collapsed ? (
-          <AppLogo size={30} variant="shield" />
+          <AppLogo size={26} variant="shield" />
         ) : (
           <Link
             href="/"
-            className="flex items-center select-none py-0.5"
+            className="flex min-h-8 items-center rounded-md select-none py-0.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
             title="PRAGNA 1-A - Start new chat"
             onClick={() => {
               startNewChat();

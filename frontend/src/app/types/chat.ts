@@ -5,6 +5,7 @@ export interface Message {
   timestamp: string;
   isStreaming?: boolean;
   images?: string[]; // base64 data URLs of attached photos
+  files?: string[]; // filenames of documents attached with this message
   citations?: Citation[]; // RAG passages the reply drew on, keyed to inline [n] markers
 }
 
@@ -30,6 +31,7 @@ export interface Conversation {
   createdAt: string;
   updatedAt: string;
   sources?: Source[];
+  historyRevision?: number; // Increases when an edit replaces the conversation's later turns.
 }
 
 export interface ConversationGroup {

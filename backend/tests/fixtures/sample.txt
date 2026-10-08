@@ -1,3 +1,3 @@
-Mimir is a chatbot project. It combines general chat with retrieval over
+Pragna is a chatbot project. It combines general chat with retrieval over
 the user's own documents. When it does not know something, it says so
 instead of guessing.

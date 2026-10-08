@@ -1,3 +1,4 @@
+import logging
 import secrets
 from urllib.parse import urlencode
 from fastapi import APIRouter, Request, HTTPException
@@ -6,6 +7,7 @@ from app import repository, oauth_providers
 from app.auth import create_access_token
 
 router = APIRouter()
+logger = logging.getLogger("pragna.oauth")
 
 STATE_COOKIE_NAME = "oauth_state"
 FRONTEND_COOKIE_NAME = "oauth_frontend"
@@ -79,6 +81,10 @@ async def oauth_callback(
 
     cookie_state = request.cookies.get(STATE_COOKIE_NAME)
     if not code or not state or not cookie_state or state != cookie_state:
+        logger.warning(
+            "OAuth state check failed: code=%s state=%s cookie_state=%s",
+            bool(code), bool(state), bool(cookie_state),
+        )
         return _frontend_redirect(request, error="Sign-in failed, please try again.")
 
     client_id, client_secret = _provider_credentials(request, provider)
@@ -90,6 +96,7 @@ async def oauth_callback(
         )
         profile = await oauth_providers.fetch_profile(provider, access_token)
     except Exception:
+        logger.exception("OAuth token exchange or profile fetch failed (redirect_uri=%s)", redirect_uri)
         return _frontend_redirect(request, error="Sign-in failed, please try again.")
 
     if not profile.get("email"):
@@ -107,6 +114,7 @@ async def oauth_callback(
 
     token = create_access_token(user_id, profile["email"], request.app.state.settings.jwt_secret)
     redirect = _frontend_redirect(request, token=token)
+    logger.warning("OAuth success for user_id=%s, redirecting to %s", user_id, redirect.headers["location"].split("#")[0])
     redirect.delete_cookie(STATE_COOKIE_NAME)
     redirect.delete_cookie(FRONTEND_COOKIE_NAME)
     return redirect

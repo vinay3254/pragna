@@ -42,11 +42,11 @@ export default function ChatHeader({ onOpenCommandPalette, onOpenTools }: ChatHe
   const handleShare = async () => {
     const shareUrl = window.location.origin + (activeConversationId ? `?chat=${activeConversationId}` : '');
     const docSummary = documents.length > 0 ? `\nAttached Knowledge Files: ${documents.map(d => d.filename).join(', ')}` : '';
-    const shareText = `Argus Conversation: ${title}${docSummary}\n${shareUrl}`;
+    const shareText = `Pragna Conversation: ${title}${docSummary}\n${shareUrl}`;
 
     if (typeof navigator !== 'undefined' && navigator.share) {
       try {
-        await navigator.share({ title, text: `Check out this Argus AI conversation: ${title}`, url: shareUrl });
+        await navigator.share({ title, text: `Check out this Pragna AI conversation: ${title}`, url: shareUrl });
         toast.success('Shared successfully!');
         return;
       } catch (e: any) {
@@ -96,7 +96,7 @@ export default function ChatHeader({ onOpenCommandPalette, onOpenTools }: ChatHe
         content += `\n---\n\n`;
       }
       for (const m of messages) {
-        const roleStr = m.role === 'user' ? '**User**' : `**Argus (${m.model || 'Assistant'})**`;
+        const roleStr = m.role === 'user' ? '**User**' : `**Pragna (${m.model || 'Assistant'})**`;
         content += `${roleStr}:\n${m.content}\n\n---\n\n`;
       }
     }

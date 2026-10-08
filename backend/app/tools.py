@@ -1,15 +1,17 @@
 import os
+import asyncio
 import logging
 import httpx
 import json
 import subprocess
 import shutil
+import urllib.parse
 from pathlib import Path
 from typing import Any
 from bs4 import BeautifulSoup
 from app import image_service, repository, skills_service, memory_service, code_interpreter, kanban_service, cron_service
 
-logger = logging.getLogger("mimir.tools")
+logger = logging.getLogger("pragna.tools")
 
 AUTO_APPROVE_TOOLS = True
 MUTATING_TOOLS = set() if AUTO_APPROVE_TOOLS else {"browser_act", "browser_click", "browser_type", "browser_exec", "terminal", "write_file", "patch"}
@@ -752,62 +754,25 @@ OLLAMA_TOOLS_SCHEMA = [
 _TODO_LIST: list[str] = []
 
 
-async def perform_web_search(query: str) -> dict[str, Any]:
-    api_key = os.getenv("BRAVE_SEARCH_API_KEY")
-    if api_key:
+def _clean_ddg_url(raw_url: str) -> str:
+    if not raw_url:
+        return ""
+    if "uddg=" in raw_url:
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
-                    params={"q": query, "count": 5},
-                    timeout=10.0
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    results = []
-                    for item in data.get("web", {}).get("results", [])[:5]:
-                        results.append({
-                            "title": item.get("title"),
-                            "url": item.get("url"),
-                            "snippet": item.get("description")
-                        })
-                    return {"success": True, "query": query, "results": results}
-        except Exception as e:
-            logger.warning(f"Brave search API failed: {e}")
+            parsed = urllib.parse.urlparse(raw_url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "uddg" in qs:
+                return qs["uddg"][0]
+        except Exception:
+            pass
+    if raw_url.startswith("//"):
+        return "https:" + raw_url
+    return raw_url
 
-    # Fallback to DuckDuckGo HTML search
-    try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            resp = await client.post(
-                "https://html.duckduckgo.com/html/",
-                data={"q": query},
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-                timeout=10.0
-            )
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                results = []
-                for result in soup.find_all("a", class_="result__url")[:5]:
-                    parent = result.find_parent("div", class_="result__body")
-                    if parent:
-                        title_elem = parent.find("a", class_="result__a")
-                        snippet_elem = parent.find("a", class_="result__snippet")
-                        results.append({
-                            "title": title_elem.get_text(strip=True) if title_elem else "Result",
-                            "url": result.get("href", "").strip(),
-                            "snippet": snippet_elem.get_text(strip=True) if snippet_elem else ""
-                        })
-                if results:
-                    return {"success": True, "query": query, "results": results}
-    except Exception as e:
-        logger.warning(f"DuckDuckGo search fallback failed: {e}")
 
-    return {
-        "success": True,
-        "query": query,
-        "results": [{"title": f"Search: {query}", "url": f"https://duckduckgo.com/?q={query}", "snippet": f"Results for '{query}'."}]
-    }
+async def perform_web_search(query: str) -> dict[str, Any]:
+    from app.search_service import perform_web_search as search
+    return await search(query)
 
 
 async def perform_web_extract(url: str) -> dict[str, Any]:
@@ -833,6 +798,7 @@ async def execute_tool(
     browser_service=None,
     conn=None,
     conversation_id: int | None = None,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     try:
         # ── Web & Search ──────────────────────────────────────────────────────
@@ -1034,18 +1000,18 @@ async def execute_tool(
                 if action == "list":
                     if conn is None:
                         return {"success": False, "error": "Database unavailable."}
-                    tasks = cron_service.list_scheduled_tasks(conn)
+                    tasks = cron_service.list_scheduled_tasks(conn, user_id=user_id)
                     return {"success": True, "tasks": tasks, "summary": f"{len(tasks)} scheduled tasks."}
                 elif action == "delete":
                     job_id = arguments.get("job_id", "")
                     if conn is None:
                         return {"success": False, "error": "Database unavailable."}
-                    return cron_service.cancel_scheduled_task(conn, int(job_id))
+                    return cron_service.cancel_scheduled_task(conn, int(job_id), user_id=user_id)
             prompt = arguments.get("prompt", "")
             schedule = arguments.get("schedule", "")
             if conn is None:
                 return {"success": False, "error": "Database connection unavailable."}
-            return cron_service.schedule_task(conn, prompt, schedule, conversation_id=str(conversation_id))
+            return cron_service.schedule_task(conn, prompt, schedule, conversation_id=str(conversation_id), user_id=user_id)
 
 
         # ── Clarify ───────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ from app.chat_service import generate_reply, _UNSET, ALLOWED_MODELS
 from app.auth import get_optional_current_user, get_current_user
 from app import repository
 
-logger = logging.getLogger("mimir.chat")
+logger = logging.getLogger("pragna.chat")
 router = APIRouter()
 
 

@@ -161,7 +161,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // covers every page, not just the ones that render a toggle button.
   const [isDarkMode, setIsDarkMode] = useState(false);
   useEffect(() => {
-    const stored = localStorage.getItem('mimir-theme');
+    const stored = localStorage.getItem('pragna-theme');
     const dark = stored ? stored === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
     setIsDarkMode(dark);
     document.documentElement.classList.toggle('dark', dark);
@@ -170,7 +170,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     setIsDarkMode((prev) => {
       const next = !prev;
       document.documentElement.classList.toggle('dark', next);
-      localStorage.setItem('mimir-theme', next ? 'dark' : 'light');
+      localStorage.setItem('pragna-theme', next ? 'dark' : 'light');
       return next;
     });
   }, []);

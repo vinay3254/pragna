@@ -34,6 +34,8 @@ from app.routes import (
     system,
     agent,
     browser,
+    billing,
+    design,
 )
 
 # Populates os.environ from backend/.env -- needed because a few keys
@@ -55,7 +57,7 @@ def _cors_origins(settings: Settings) -> list[str]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    fastapi_app = FastAPI(title="pragna-mimir", description="PRAGNA 1-A UI + Mimir Engine Backend")
+    fastapi_app = FastAPI(title="pragna", description="PRAGNA 1-A UI + Engine Backend")
     fastapi_app.state.settings = settings
 
     fastapi_app.add_middleware(
@@ -123,6 +125,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     fastapi_app.include_router(system.router)
     fastapi_app.include_router(agent.router)
     fastapi_app.include_router(browser.router)
+    fastapi_app.include_router(billing.router)
+    fastapi_app.include_router(design.router)
     return fastapi_app
 
 

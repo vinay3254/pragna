@@ -6,13 +6,16 @@ import ChatWindow from './ChatWindow';
 import ArtifactPanel from './ArtifactPanel';
 import CommandPalette from './CommandPalette';
 import ToolsPanel from './ToolsPanel';
+import ImageGenerationModal from './ImageGenerationModal';
 import { Conversation, Message, ModelOption, Source } from '../types/chat';
 import { generateId, getConversationTitle, groupConversationsByDate } from '../utils/chatUtils';
 import { SANSKRIT_MODELS } from '@/lib/modelDisplayNames';
 import { getAuthToken } from '@/lib/api';
+import { persistChatValue, readChatValue, subscribeChatHistory } from '@/lib/chat-storage';
 import { useAuth } from '@/context/AuthContext';
 import { notifyIfBackgrounded } from '@/lib/notifications';
 import { toast } from 'sonner';
+import { Clock } from 'lucide-react';
 
 export const MODELS: ModelOption[] = SANSKRIT_MODELS.map((m) => ({
   id: m.id,
@@ -43,15 +46,56 @@ function getActiveStorageKey(user: { id?: number | string | null; email?: string
   return identifier ? `claudechat_active:${identifier}` : null;
 }
 
-function loadConversations(user: { id?: number | string | null; email?: string | null } | null): Conversation[] {
+async function loadConversations(user: { id?: number | string | null; email?: string | null } | null): Promise<Conversation[]> {
   if (typeof window === 'undefined') return [];
   const key = getConversationsStorageKey(user);
   if (!key) return [];
   try {
-    const raw = localStorage.getItem(key);
+    const raw = await readChatValue(key);
     return raw ? JSON.parse(raw) : [];
   } catch {
+    toast.error('Chat history could not be loaded. Existing saved data has not been cleared.', { id: 'chat-history-load-error' });
     return [];
+  }
+}
+
+async function loadRecoveredConversations(
+  user: { id?: number | string | null; email?: string | null } | null,
+  local: Conversation[],
+  token: string | null,
+): Promise<Conversation[]> {
+  const key = getConversationsStorageKey(user);
+  if (!key || !token) return local;
+  try {
+    const headers = { Authorization: `Bearer ${token}` };
+    const response = await fetch('/api/conversations?q=Recovered%3A', { headers, signal: AbortSignal.timeout(3000) });
+    if (!response.ok) return local;
+    const remoteList = await response.json();
+    const recovered: Conversation[] = [];
+    for (const entry of remoteList) {
+      if (!String(entry.title).startsWith('Recovered:')) continue;
+      const detail = await fetch(`/api/conversations/${entry.id}`, { headers, signal: AbortSignal.timeout(3000) });
+      if (!detail.ok) continue;
+      const remote = await detail.json();
+      if (String(remote.user_id) !== String(user?.id)) continue;
+      const id = `recovered-${remote.id}`;
+      if (local.some(c => c.id === id)) continue;
+      const messages: Message[] = (remote.messages || [])
+        .filter((m: any) => m.role === 'user' || m.role === 'assistant')
+        .map((m: any) => ({ id: `${id}-${m.id}`, role: m.role, content: m.content, timestamp: m.created_at }));
+      const prompts = messages.filter(m => m.role === 'user').map(m => m.content);
+      // A surviving copy of the same chat needs no second sidebar entry.
+      if (prompts.length && local.some(c => prompts.every(prompt => c.messages.some(m => m.role === 'user' && m.content === prompt)))) continue;
+      if (messages.length) recovered.push({ id, title: remote.title, messages,
+        model: MODELS[0].id, createdAt: remote.created_at,
+        updatedAt: messages.at(-1)?.timestamp || remote.created_at });
+    }
+    if (!recovered.length) return local;
+    await persistChatValue(key, JSON.stringify([...local, ...recovered]));
+    // The durable merge also honors deletion tombstones on later imports.
+    return loadConversations(user);
+  } catch {
+    return local;
   }
 }
 
@@ -60,18 +104,20 @@ function saveConversations(user: { id?: number | string | null; email?: string |
   const key = getConversationsStorageKey(user);
   if (!key) return; // Never write while user is null
   try {
-    localStorage.setItem(key, JSON.stringify(convs));
+    void persistChatValue(key, JSON.stringify(convs)).catch(() => {
+      toast.error('Chat history could not be saved. Keep this tab open and export important chats.', { id: 'chat-history-save-error' });
+    });
   } catch {
-    // Ignore quota or serialization errors
+    toast.error('Chat history could not be saved. Keep this tab open and export important chats.', { id: 'chat-history-save-error' });
   }
 }
 
-function loadActiveConversationId(user: { id?: number | string | null; email?: string | null } | null): string | null {
+async function loadActiveConversationId(user: { id?: number | string | null; email?: string | null } | null): Promise<string | null> {
   if (typeof window === 'undefined') return null;
   const key = getActiveStorageKey(user);
   if (!key) return null;
   try {
-    return localStorage.getItem(key);
+    return await readChatValue(key);
   } catch {
     return null;
   }
@@ -82,11 +128,9 @@ function saveActiveConversationId(user: { id?: number | string | null; email?: s
   const key = getActiveStorageKey(user);
   if (!key) return; // Never write while user is null
   try {
-    if (id) {
-      localStorage.setItem(key, id);
-    } else {
-      localStorage.removeItem(key);
-    }
+    void persistChatValue(key, id).catch(() => {
+      toast.error('Selected chat could not be saved. Chat history remains separate.', { id: 'chat-selection-save-error' });
+    });
   } catch {
     // Ignore error
   }
@@ -111,18 +155,22 @@ export default function ChatInterface() {
   }, [user]);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [historyOwner, setHistoryOwner] = useState<string | null>(null);
+  const historyReady = historyOwner !== null && historyOwner === getConversationsStorageKey(user);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [selectedModel, setSelectedModel] = useState<ModelOption>(MODELS[0]);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [isStreaming, setIsStreaming] = useState(false);
+  const streamControllerRef = React.useRef<AbortController | null>(null);
   const [mounted, setMounted] = useState(false);
 
-  // Mimir-integrated feature states
+  // Integrated feature states
   const [artifactOpen, setArtifactOpen] = useState(false);
   const [activeArtifact, setActiveArtifact] = useState<{ title: string; content: string; language?: string } | null>(null);
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const [toolsPanelOpen, setToolsPanelOpen] = useState(false);
+  const [imageStudioOpen, setImageStudioOpen] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState<string>(() => {
     if (typeof window === 'undefined') return 'en';
     const initialized = localStorage.getItem('pragna_lang_initialized');
@@ -181,101 +229,155 @@ export default function ChatInterface() {
 
   // Load user-specific conversations and active ID whenever user changes
   useEffect(() => {
+    let cancelled = false;
     // When user changes or logs out, first reset states to avoid flashing previous account's chats
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+    setIsStreaming(false);
     setConversations([]);
+    setHistoryOwner(null);
     setActiveConversationId(null);
     setArtifactOpen(false);
     setActiveArtifact(null);
 
     if (!user) return;
 
-    const savedConvs = loadConversations(user);
-    // One-time backfill: earlier versions left conversations titled "New conversation"
-    // even after real messages were sent into them. Derive a real title wherever we can.
-    let backfilled = false;
-    const fixedConvs = savedConvs.map(c => {
-      if (c.title !== 'New conversation') return c;
-      const firstUserMsg = c.messages.find(m => m.role === 'user');
-      if (!firstUserMsg) return c;
-      backfilled = true;
-      return { ...c, title: getConversationTitle(firstUserMsg.content) };
-    });
-    if (backfilled) saveConversations(user, fixedConvs);
+    const token = getAuthToken();
+    void Promise.all([loadConversations(user).then(saved => loadRecoveredConversations(user, saved, token)), loadActiveConversationId(user)]).then(([savedConvs, savedActive]) => {
+      if (cancelled) return;
+      // Backfill titles of older conversations after loading this account's history.
+      let backfilled = false;
+      const fixedConvs = savedConvs.map(c => {
+        if (c.title !== 'New conversation') return c;
+        const firstUserMsg = c.messages.find(m => m.role === 'user');
+        if (!firstUserMsg) return c;
+        backfilled = true;
+        return { ...c, title: getConversationTitle(firstUserMsg.content) };
+      });
+      if (backfilled) saveConversations(user, fixedConvs);
 
-    const savedActive = loadActiveConversationId(user);
-    setConversations(fixedConvs);
-    if (savedActive && fixedConvs.some(c => c.id === savedActive)) {
-      setActiveConversationId(savedActive);
-    } else if (savedActive && fixedConvs.length > 0) {
-      setActiveConversationId(savedActive);
-    } else {
-      setActiveConversationId(null);
-    }
+      setConversations(fixedConvs);
+      if (savedActive && fixedConvs.some(c => c.id === savedActive)) {
+        setActiveConversationId(savedActive);
+      } else {
+        setActiveConversationId(null);
+        saveActiveConversationId(user, null);
+      }
+      setHistoryOwner(getConversationsStorageKey(user));
+    });
+    return () => { cancelled = true; };
   }, [user?.id, user?.email]);
 
-  // Poll scheduled reminders and surface the ones that fired while we weren't
-  // watching (toast + a message dropped into whichever conversation is open).
+  useEffect(() => () => {
+    streamControllerRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    const key = getConversationsStorageKey(user);
+    if (!key || !historyReady) return;
+    let cancelled = false;
+    const unsubscribe = subscribeChatHistory(key, () => {
+      void loadConversations(user).then(saved => {
+        if (!cancelled && !streamControllerRef.current) setConversations(saved);
+      });
+    });
+    return () => { cancelled = true; unsubscribe(); };
+  }, [user?.id, user?.email, historyReady]);
+
+  // Scheduled tasks run on the backend and post their answers into a backend chat.
+  // Poll the tasks and copy those answers into this account's persisted history,
+  // local scheduled chat, with a toast when a new answer arrives.
   const activeConversationIdRef = React.useRef(activeConversationId);
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
 
   useEffect(() => {
-    if (!user) return;
-    const seenCompletedIds = new Set<string | number>();
+    if (!user || !historyReady) return;
+    const syncedRunKeys = new Map<number, string>();
+    const pendingOpen = new URLSearchParams(window.location.search).get('open');
+    const seenMessageIds = new Set<string>();
     let firstPoll = true;
+    let cancelled = false;
 
     const poll = async () => {
       try {
         const token = getAuthToken();
         if (!token) return;
-        const res = await fetch('/api/tools/scheduled', { headers: { Authorization: `Bearer ${token}` } });
+        const headers = { Authorization: `Bearer ${token}` };
+        const res = await fetch('/api/tools/scheduled', { headers });
         if (!res.ok) return;
         const data = await res.json();
+        if (cancelled) return;
         const jobs: any[] = data?.jobs || [];
-        const completed = jobs.filter(j => j.status === 'completed');
 
-        if (firstPoll) {
-          // Don't fire toasts for reminders that already completed before this
-          // tab was open — just establish the baseline.
-          completed.forEach(j => seenCompletedIds.add(j.id));
-          firstPoll = false;
-          return;
-        }
+        for (const job of jobs) {
+          if (!job.conversation_id) continue;
+          const runKey = `${job.last_run || ''}:${job.status}:${job.running ? 1 : 0}:${(job.last_result || '').length}`;
+          if (syncedRunKeys.get(job.id) === runKey) continue;
+          syncedRunKeys.set(job.id, runKey);
 
-        for (const job of completed) {
-          if (seenCompletedIds.has(job.id)) continue;
-          seenCompletedIds.add(job.id);
-          toast(job.prompt, { icon: '⏰', duration: 10000 });
-          notifyIfBackgrounded('Pragna reminder', job.prompt);
+          const convRes = await fetch(`/api/conversations/${job.conversation_id}`, { headers });
+          if (!convRes.ok) continue;
+          const remote = await convRes.json();
+          if (cancelled) return;
+          const localId = `sched-${job.conversation_id}`;
+          const remoteMessages: Message[] = (remote.messages || []).map((m: any) => ({
+            id: `${localId}-${m.id}`,
+            role: m.role === 'user' ? 'user' : 'assistant',
+            content: m.content,
+            timestamp: m.created_at || new Date().toISOString(),
+          }));
 
-          const convId = activeConversationIdRef.current;
-          if (convId) {
-            setConversations(prev => {
-              const updated = prev.map(c => {
-                if (c.id !== convId) return c;
-                const reminderMsg: Message = {
-                  id: generateId('msg'),
-                  role: 'assistant',
-                  content: `⏰ **Reminder:** ${job.prompt}`,
-                  timestamp: new Date().toISOString(),
-                };
-                return { ...c, messages: [...c.messages, reminderMsg], updatedAt: new Date().toISOString() };
-              });
-              saveConversations(userRef.current, updated);
-              return updated;
+          const addedCount = remoteMessages.filter(m => !seenMessageIds.has(m.id)).length;
+          remoteMessages.forEach(m => seenMessageIds.add(m.id));
+          setConversations(prev => {
+            const existing = prev.find(c => c.id === localId);
+            const knownIds = new Set((existing?.messages || []).map(m => m.id));
+            const fresh = remoteMessages.filter(m => !knownIds.has(m.id));
+            if (fresh.length === 0) return prev;
+            const now = new Date().toISOString();
+            const updated = existing
+              ? prev.map(c => (c.id === localId ? { ...c, messages: [...c.messages, ...fresh], updatedAt: now } : c))
+              : [
+                  {
+                    id: localId,
+                    title: String(remote.title || job.title || 'Scheduled task').replace(/^\u23f0\uFE0F?\s*/, ''),
+                    messages: fresh,
+                    model: 'scheduled-task',
+                    createdAt: remote.created_at || now,
+                    updatedAt: now,
+                  } as Conversation,
+                  ...prev,
+                ];
+            saveConversations(userRef.current, updated);
+            return updated;
+          });
+
+          if (pendingOpen === localId) {
+            setActiveConversationId(localId);
+            window.history.replaceState(null, '', window.location.pathname);
+          }
+
+          if (!firstPoll && addedCount > 0) {
+            toast(`Result ready: ${job.title || 'Scheduled task'}`, {
+              icon: <Clock size={16} />,
+              duration: 15000,
+              action: { label: 'Open', onClick: () => setActiveConversationId(localId) },
             });
+            notifyIfBackgrounded('Pragna scheduled task', job.title || 'Result ready');
           }
         }
+        firstPoll = false;
       } catch {
-        // Network hiccup — just try again on the next tick.
+        // Network hiccup: try again on the next tick.
       }
     };
 
     poll();
-    const interval = setInterval(poll, 8000);
-    return () => clearInterval(interval);
-  }, [user?.id]);
+    const interval = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [user?.id, historyReady]);
 
   // Apply theme to document
   useEffect(() => {
@@ -290,18 +392,6 @@ export default function ChatInterface() {
 
   const activeConversation = conversations.find(c => c.id === activeConversationId) ?? null;
 
-  const attachSource = useCallback((source: Source) => {
-    setConversations(prev => {
-      const updated = prev.map(c => {
-        if (c.id !== activeConversationIdRef.current) return c;
-        if (c.sources?.some(s => s.id === source.id)) return c;
-        return { ...c, sources: [...(c.sources || []), source] };
-      });
-      saveConversations(userRef.current, updated);
-      return updated;
-    });
-  }, []);
-
   const removeSource = useCallback((sourceId: number) => {
     setConversations(prev => {
       const updated = prev.map(c => {
@@ -313,7 +403,23 @@ export default function ChatInterface() {
     });
   }, []);
 
+  const stopStreaming = useCallback(() => {
+    if (!streamControllerRef.current) return;
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+    setIsStreaming(false);
+    setConversations(prev => {
+      const updated = prev.map(c => ({
+        ...c,
+        messages: c.messages.map(m => ({ ...m, isStreaming: false })),
+      }));
+      saveConversations(userRef.current, updated);
+      return updated;
+    });
+  }, []);
+
   const createNewConversation = useCallback(() => {
+    stopStreaming();
     const newConv: Conversation = {
       id: generateId('conv'),
       title: 'New conversation',
@@ -329,14 +435,22 @@ export default function ChatInterface() {
     });
     setActiveConversationId(newConv.id);
     saveActiveConversationId(userRef.current, newConv.id);
-  }, [selectedModel.id]);
+  }, [selectedModel.id, stopStreaming]);
 
   const selectConversation = useCallback((id: string) => {
+    stopStreaming();
     setActiveConversationId(id);
     saveActiveConversationId(userRef.current, id);
-  }, []);
+  }, [stopStreaming]);
 
   const deleteConversation = useCallback((id: string) => {
+    if (activeConversationId === id) stopStreaming();
+    const key = getConversationsStorageKey(userRef.current);
+    if (key) {
+      void persistChatValue(key, '[]', id).catch(() => {
+        toast.error('Chat deletion could not be saved.', { id: 'chat-deletion-save-error' });
+      });
+    }
     setConversations(prev => {
       const updated = prev.filter(c => c.id !== id);
       saveConversations(userRef.current, updated);
@@ -346,7 +460,7 @@ export default function ChatInterface() {
       setActiveConversationId(null);
       saveActiveConversationId(userRef.current, null);
     }
-  }, [activeConversationId]);
+  }, [activeConversationId, stopStreaming]);
 
   const renameConversation = useCallback((id: string, newTitle: string) => {
     setConversations(prev => {
@@ -359,11 +473,18 @@ export default function ChatInterface() {
   }, []);
 
   // Backend integration point: replace simulateStream with real fetch to /api/chat
-  const sendMessage = useCallback(async (content: string, images?: string[], newSources?: Source[], language?: string, modelOverride?: string) => {
-    if ((!content.trim() && !images?.length && !newSources?.length) || isStreaming) return;
+  const sendMessage = useCallback(async (content: string, images?: string[], newSources?: Source[], language?: string, modelOverride?: string, editMessageId?: string) => {
+    if ((!content.trim() && !images?.length && !newSources?.length && !editMessageId) || streamControllerRef.current) return;
     const titleSource = content.trim() || (images?.length ? 'Shared a photo' : 'Shared a file');
 
-    let convId = activeConversationId;
+    let convId = conversations.some(c => c.id === activeConversationId) ? activeConversationId : null;
+    const currentConversation = conversations.find(c => c.id === convId);
+    const editIndex = editMessageId ? currentConversation?.messages.findIndex(message => message.id === editMessageId && message.role === 'user') ?? -1 : -1;
+    if (editMessageId && editIndex < 0) return;
+    const originalMessage = editIndex >= 0 ? currentConversation?.messages[editIndex] : undefined;
+    if (!content.trim() && !images?.length && !newSources?.length && !originalMessage?.files?.length) return;
+    const precedingMessages = editIndex >= 0 ? currentConversation!.messages.slice(0, editIndex) : currentConversation?.messages ?? [];
+    const historyRevision = editMessageId ? Math.max(Date.now(), (currentConversation?.historyRevision ?? 0) + 1) : undefined;
     // "New conversation" is also true for a conversation pre-created empty by the
     // "+ New chat" button — not just one created in this very call — so its title
     // still gets derived from the first real message sent into it.
@@ -404,22 +525,24 @@ export default function ChatInterface() {
     }
 
     const userMessage: Message = {
-      id: generateId('msg'),
+      id: originalMessage?.id || generateId('msg'),
       role: 'user',
       content,
       timestamp: new Date().toISOString(),
       images,
+      files: originalMessage?.files || (newSources?.length ? newSources.map(s => s.filename) : undefined),
     };
 
     // Add user message
     setConversations(prev => {
       const updated = prev.map(c => {
         if (c.id !== convId) return c;
-        const msgs = [...c.messages, userMessage];
+        const msgs = [...(editMessageId ? precedingMessages : c.messages), userMessage];
         return {
           ...c,
           messages: msgs,
-          title: isNewConv ? getConversationTitle(titleSource) : c.title,
+          title: isNewConv || editIndex === 0 ? getConversationTitle(titleSource) : c.title,
+          ...(historyRevision ? { historyRevision } : {}),
           updatedAt: new Date().toISOString(),
         };
       });
@@ -428,6 +551,9 @@ export default function ChatInterface() {
     });
 
     setIsStreaming(true);
+    const controller = new AbortController();
+    streamControllerRef.current = controller;
+    const timeout = setTimeout(() => controller.abort(), 180000);
 
     const assistantMessageId = generateId('msg');
     const assistantMessage: Message = {
@@ -451,14 +577,13 @@ export default function ChatInterface() {
     let streamedAny = false;
     try {
       const currentConv = conversations.find(c => c.id === convId);
-      const history = (currentConv?.messages || []).map(m => ({ role: m.role, content: m.content, images: m.images }));
+      const history = precedingMessages.map(m => ({ role: m.role, content: m.content, images: m.images }));
       history.push({ role: 'user', content, images });
       const effectiveSources = [
         ...(currentConv?.sources || []),
         ...((newSources || []).filter(s => !(currentConv?.sources || []).some(e => e.id === s.id))),
       ];
 
-      const customKey = typeof window !== 'undefined' ? localStorage.getItem('claudechat_custom_api_key') : null;
       let customPrompt = typeof window !== 'undefined' ? localStorage.getItem('claudechat_system_prompt') : null;
       if (customPrompt && (customPrompt.includes('Claude') || customPrompt.includes('Anthropic') || customPrompt.includes('helpful AI assistant.'))) {
         localStorage.removeItem('claudechat_system_prompt');
@@ -506,7 +631,6 @@ export default function ChatInterface() {
         body: JSON.stringify({
           messages: history,
           model: effectiveModelId,
-          apiKey: customKey || undefined,
           systemPrompt: customPrompt || undefined,
           userName: clientUserName,
           userEmail: user?.email || undefined,
@@ -514,7 +638,7 @@ export default function ChatInterface() {
           sourceDocumentIds: effectiveSources.length ? effectiveSources.map(s => s.id) : undefined,
           preferredLanguage: effectiveLang !== 'auto' ? effectiveLang : undefined,
         }),
-        signal: AbortSignal.timeout(90000),
+        signal: controller.signal,
       });
 
       if (response.ok && response.body) {
@@ -525,11 +649,27 @@ export default function ChatInterface() {
         let pendingDelta = '';
         let pendingCitations: any[] | null = null;
         let lastFlush = Date.now();
+        // Status text (e.g. "Creating image…") shown until the first real text replaces it.
+        let statusShown = false;
+
+        const showStatus = (status: string) => {
+          if (controller.signal.aborted) return;
+          statusShown = true;
+          setConversations(prev =>
+            prev.map(c => c.id !== convId ? c : {
+              ...c,
+              messages: c.messages.map(m => m.id !== assistantMessageId ? m : { ...m, content: `_${status}_`, isStreaming: true }),
+            })
+          );
+        };
 
         const flushStream = () => {
+          if (controller.signal.aborted) return;
           if (!pendingDelta && !pendingCitations) return;
           const deltaToFlush = pendingDelta;
           const citationsToFlush = pendingCitations;
+          const replaceStatus = statusShown && !!deltaToFlush;
+          if (replaceStatus) statusShown = false;
           pendingDelta = '';
           pendingCitations = null;
 
@@ -542,7 +682,7 @@ export default function ChatInterface() {
                   if (m.id !== assistantMessageId) return m;
                   return {
                     ...m,
-                    content: m.content + deltaToFlush,
+                    content: (replaceStatus ? '' : m.content) + deltaToFlush,
                     ...(citationsToFlush ? { citations: citationsToFlush } : {}),
                     isStreaming: true,
                   };
@@ -552,7 +692,7 @@ export default function ChatInterface() {
           );
         };
 
-        while (true) {
+        streamLoop: while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
@@ -562,7 +702,10 @@ export default function ChatInterface() {
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed || trimmed.startsWith(':')) continue;
-            if (trimmed === 'data: [DONE]') break;
+            if (trimmed === 'data: [DONE]') {
+              void reader.cancel().catch(() => {});
+              break streamLoop;
+            }
             if (trimmed.startsWith('data: ')) {
               try {
                 const data = JSON.parse(trimmed.slice(6));
@@ -574,6 +717,7 @@ export default function ChatInterface() {
                 if (Array.isArray(data.citations) && data.citations.length > 0) {
                   pendingCitations = data.citations;
                 }
+                if (typeof data.status === 'string' && !streamedAny) showStatus(data.status);
               } catch {
                 // Ignore chunk parse error
               }
@@ -588,8 +732,14 @@ export default function ChatInterface() {
         flushStream();
       }
     } catch (err) {
-      console.error('Streaming error from /api/chat:', err);
+      if (!controller.signal.aborted) console.error('Streaming error from /api/chat:', err);
     }
+
+    clearTimeout(timeout);
+    // A stopped request must not overwrite a newer request's messages or state.
+    if (streamControllerRef.current !== controller) return;
+    streamControllerRef.current = null;
+    setIsStreaming(false);
 
     // If no stream tokens received (e.g. backend error or network failure)
     if (!streamedAny) {
@@ -626,21 +776,7 @@ export default function ChatInterface() {
       return updated;
     });
 
-    setIsStreaming(false);
-  }, [activeConversationId, isStreaming, selectedModel.id, conversations, selectedLanguage, user]);
-
-  const stopStreaming = useCallback(() => {
-    setIsStreaming(false);
-    // Mark any streaming messages as complete
-    setConversations(prev => {
-      const updated = prev.map(c => ({
-        ...c,
-        messages: c.messages.map(m => ({ ...m, isStreaming: false })),
-      }));
-      saveConversations(userRef.current, updated);
-      return updated;
-    });
-  }, []);
+  }, [activeConversationId, selectedModel.id, conversations, selectedLanguage, user]);
 
   const toggleTheme = useCallback(() => {
     setTheme(prev => prev === 'dark' ? 'light' : 'dark');
@@ -648,7 +784,7 @@ export default function ChatInterface() {
 
   const groupedConversations = groupConversationsByDate(conversations);
 
-  if (!mounted) {
+  if (!mounted || !historyReady) {
     return (
       <div className="flex h-screen w-full items-center justify-center bg-background">
         <div className="flex items-center gap-2">
@@ -677,6 +813,7 @@ export default function ChatInterface() {
         onOpenArtifacts={() => setArtifactOpen(p => !p)}
         onOpenTools={() => setToolsPanelOpen(true)}
         onOpenSearch={() => setCmdPaletteOpen(true)}
+        onOpenImageStudio={() => setImageStudioOpen(true)}
       />
       <div className="flex-1 flex overflow-hidden min-w-0">
         <ChatWindow
@@ -686,6 +823,11 @@ export default function ChatInterface() {
           models={MODELS}
           onSelectModel={setSelectedModel}
           onSendMessage={sendMessage}
+          onEditMessage={(messageId, content) => {
+            const message = activeConversation?.messages.find(item => item.id === messageId);
+            if (!message || message.role !== 'user') return;
+            void sendMessage(content, message.images, undefined, selectedLanguage, undefined, messageId);
+          }}
           onStopStreaming={stopStreaming}
           onNewConversation={createNewConversation}
           onToggleSidebar={() => setSidebarOpen(p => !p)}
@@ -696,7 +838,6 @@ export default function ChatInterface() {
           onOpenCommandPalette={() => setCmdPaletteOpen(true)}
           onOpenTools={() => setToolsPanelOpen(true)}
           sources={activeConversation?.sources}
-          onAttachSource={attachSource}
           onRemoveSource={removeSource}
           selectedLanguage={selectedLanguage}
           onSelectLanguage={handleSelectLanguage}
@@ -719,12 +860,17 @@ export default function ChatInterface() {
 
       {/* Tools & Skills Modal */}
       {toolsPanelOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="relative w-full max-w-2xl max-h-[85vh] bg-card rounded-2xl shadow-2xl border border-border flex flex-col overflow-hidden">
-            <ToolsPanel onClose={() => setToolsPanelOpen(false)} />
-          </div>
-        </div>
+        <ToolsPanel onClose={() => setToolsPanelOpen(false)} />
       )}
+
+      {/* OmniRoute Image Studio Modal */}
+      <ImageGenerationModal
+        open={imageStudioOpen}
+        onClose={() => setImageStudioOpen(false)}
+        onInsertToChat={(imageUrl, imgPrompt) => {
+          sendMessage(`![${imgPrompt}](${imageUrl})`);
+        }}
+      />
     </div>
   );
 }

@@ -15,7 +15,7 @@ export default function OAuthCallbackPage() {
       // A hard navigation to "/" is about to discard this component and any
       // toast it fired -- stash the message so AuthScreen can show it after
       // the reload, once it's actually mounted long enough to be seen.
-      sessionStorage.setItem('argus-oauth-error', error);
+      sessionStorage.setItem('pragna-oauth-error', error);
     }
 
     window.location.href = '/';

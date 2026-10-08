@@ -14,3 +14,9 @@ email-validator
 edge-tts
 psycopg[binary]>=3.1.0
 psycopg_pool>=3.1.0
+python-docx
+openpyxl
+python-pptx
+reportlab
+ddgs
+Pillow
