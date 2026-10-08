@@ -12,6 +12,7 @@ import { generateId, getConversationTitle, groupConversationsByDate } from '../u
 import { SANSKRIT_MODELS } from '@/lib/modelDisplayNames';
 import { getAuthToken } from '@/lib/api';
 import { persistChatValue, readChatValue, subscribeChatHistory } from '@/lib/chat-storage';
+import { startChatSync } from '@/lib/chat-sync';
 import { useAuth } from '@/context/AuthContext';
 import { notifyIfBackgrounded } from '@/lib/notifications';
 import { toast } from 'sonner';
@@ -282,6 +283,13 @@ export default function ChatInterface() {
       });
     });
     return () => { cancelled = true; unsubscribe(); };
+  }, [user?.id, user?.email, historyReady]);
+
+  // Share this account's chats across devices through the server.
+  useEffect(() => {
+    const key = getConversationsStorageKey(user);
+    if (!key || !historyReady) return;
+    return startChatSync(key);
   }, [user?.id, user?.email, historyReady]);
 
   // Scheduled tasks run on the backend and post their answers into a backend chat.
