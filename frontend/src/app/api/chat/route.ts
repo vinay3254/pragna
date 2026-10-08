@@ -263,10 +263,18 @@ function getOmnirouteKey(): string {
 }
 
 const OMNIROUTE_CHAT_MODEL = 'antigravity/gemini-3.7-flash-high';
+// Gemini 3.7 flash always thinks 4-6s before its first word; 2.5 flash starts in about 2s.
+const OMNIROUTE_QUICK_MODEL = 'antigravity/gemini-2.5-flash';
 
-function mapOmnirouteModel(model: string): string {
+function isQuickMessage(text: string): boolean {
+  return text.length <= 280
+    && !/```|\b(code|function|bug|debug|error|step by step|in detail|compare|essay|analy[sz]e|write|plan|design|calculate|prove)\b/i.test(text)
+    && !needsTools(text, false);
+}
+
+function mapOmnirouteModel(model: string, lastUserMessage = ''): string {
   if (model?.startsWith('antigravity/')) return model;
-  return OMNIROUTE_CHAT_MODEL;
+  return isQuickMessage(lastUserMessage) ? OMNIROUTE_QUICK_MODEL : OMNIROUTE_CHAT_MODEL;
 }
 
 function getBackendOllamaKeys(): string[] {
@@ -550,7 +558,7 @@ export async function POST(req: NextRequest) {
     const modelConfig = getModelConfig(model) || getModelConfig(targetModel);
     const modelDisplayName = modelConfig?.displayName || (model.includes('/') ? model.split('/')[1] : model);
     const modelScript = modelConfig?.sanskritScript ? ` (${modelConfig.sanskritScript})` : '';
-    const modelRaw = getOmnirouteKey() && !hasImages ? mapOmnirouteModel(model) : targetModel; // the model actually serving this request
+    const modelRaw = getOmnirouteKey() && !hasImages ? mapOmnirouteModel(model, lastUserMessage) : targetModel; // the model actually serving this request
     const modelMeaning = modelConfig?.meaning ? ` — meaning "${modelConfig.meaning}"` : '';
     const modelDesc = modelConfig?.description ? ` (${modelConfig.description})` : '';
 
@@ -937,7 +945,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
           if (omniKey && !hasImages) {
             try {
               const omniUrl = `${(process.env.OMNIROUTE_BASE_URL || 'http://127.0.0.1:20128').replace(/\/+$/, '')}/v1/chat/completions`;
-              let omniModel = mapOmnirouteModel(model);
+              let omniModel = toolsEnabled ? OMNIROUTE_CHAT_MODEL : mapOmnirouteModel(model, lastUserMessage);
               for (let round = 0; round < MAX_ROUNDS; round++) {
                 // The last round runs without tools so the model has to write a final answer.
                 const withTools = toolsEnabled && round < MAX_ROUNDS - 1;
