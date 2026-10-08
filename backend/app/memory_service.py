@@ -122,6 +122,16 @@ def explicit_facts(message: str, history: list[dict] | None = None) -> list[dict
     return facts
 
 
+def reply_facts(latest: str, previous_assistant: str) -> list[dict]:
+    """A bare answer ("its sigmaslayer") to the assistant's nickname question carries no 'my nickname is'."""
+    if "nickname" not in previous_assistant.lower():
+        return []
+    match = re.fullmatch(r"\s*(?:(?:it'?s|its|it is|i go by|just)\s+)?[\"']?([\w'-]{2,30})[\"']?\s*[.!]?\s*", latest, re.I)
+    if not match or match[1].lower() in {"no", "nope", "none", "nothing", "yes", "yeah", "yep", "nah", "nevermind"}:
+        return []
+    return [{"key": "identity.nickname", "content": f"User's nickname is {match[1]}."}]
+
+
 async def prepare_memories(conn, settings, user_id: int, messages: list[dict],
                            conversation_id: int | None = None) -> dict:
     """Read/save/read in one awaited operation, shared by all chat engines."""
@@ -129,6 +139,10 @@ async def prepare_memories(conn, settings, user_id: int, messages: list[dict],
     latest = user_messages[-1]["content"] if user_messages else ""
     history = user_messages[:-1][-12:]
     candidates = explicit_facts(latest, history)
+    previous_assistant = next((m["content"] for m in reversed(messages[:-1])
+                               if m.get("role") == "assistant" and isinstance(m.get("content"), str)), "")
+    if messages and messages[-1].get("role") == "user":
+        candidates.extend(reply_facts(latest, previous_assistant))
     # Short references ('save it') reuse USER statements in the current chat.
     if re.fullmatch(r"\s*(?:please\s+)?(?:save|remember|store) (?:it|that|this)[.!]?\s*", latest, re.I):
         for index, item in enumerate(history):
