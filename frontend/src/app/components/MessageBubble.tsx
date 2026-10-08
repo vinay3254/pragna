@@ -646,6 +646,11 @@ export default function MessageBubble({
                   {inlineTime && (
                     <span className="ml-1 text-[10px] text-muted-foreground/40 font-mono-data tracking-tight leading-none">{inlineTime}</span>
                   )}
+                  {message.model && (
+                    <span className="ml-1 text-[10px] text-muted-foreground/40 font-mono-data tracking-tight leading-none" title="Model that wrote this reply">
+                      {message.model.split('/').pop()}
+                    </span>
+                  )}
                 </div>
               )}
             </div>
