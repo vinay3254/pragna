@@ -15,6 +15,7 @@ def isolated(monkeypatch):
     search._cache.clear()
     search._inflight.clear()
     monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    monkeypatch.delenv("OMNIROUTE_API_KEY", raising=False)
     monkeypatch.setattr(search, "_ddgs", AsyncMock(return_value=[]))
     monkeypatch.setattr(search, "_html_search", AsyncMock(return_value=[]))
     monkeypatch.setattr(search, "_lite_search", AsyncMock(return_value=[]))
@@ -132,3 +133,29 @@ def test_chat_instructions_are_not_search_terms():
     assert search._search_query('site:python.org Python 3.14.8') == 'site:python.org Python 3.14.8'
     assert search._search_query('Search online for Bengaluru weather today') == 'Bengaluru weather today'
     assert search._search_query('Search the web for "climate change"') == '"climate change"'
+
+
+async def test_omniroute_search_is_preferred_when_configured(monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_API_KEY", "sk-test")
+    monkeypatch.setenv("OMNIROUTE_BASE_URL", "http://omni.test")
+    scraper = AsyncMock(return_value=[HIT])
+    monkeypatch.setattr(search, "_ddgs", scraper)
+    with respx.mock:
+        route = respx.post("http://omni.test/v1/search").mock(
+            return_value=httpx.Response(200, json={"results": [HIT]}))
+        result = await search.perform_web_search("latest version")
+    assert result["provider"] == "omniroute"
+    assert route.calls.last.request.headers["authorization"] == "Bearer sk-test"
+    assert b"duckduckgo-free" in route.calls.last.request.content
+    scraper.assert_not_awaited()
+
+
+async def test_scrapers_back_up_a_failing_omniroute(monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_API_KEY", "sk-test")
+    monkeypatch.setenv("OMNIROUTE_BASE_URL", "http://omni.test")
+    monkeypatch.setattr(search, "OMNIROUTE_LEAD", 0)
+    monkeypatch.setattr(search, "_ddgs", AsyncMock(return_value=[HIT]))
+    with respx.mock:
+        respx.post("http://omni.test/v1/search").mock(return_value=httpx.Response(502))
+        result = await search.perform_web_search("latest version")
+    assert result["provider"] == "ddgs"

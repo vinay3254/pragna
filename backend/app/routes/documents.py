@@ -1,3 +1,4 @@
+import re
 import os
 import time
 from pathlib import Path
@@ -227,7 +228,7 @@ async def download_generated_document(filename: str):
 
     if not filepath.exists() and not frontend_copy.exists():
         ext = Path(clean_name).suffix.lower().lstrip('.')
-        stem = Path(clean_name).stem.replace('_', ' ').replace('-', ' ')
+        stem = re.sub(r'^\d{9,}[-_]', '', Path(clean_name).stem).replace('_', ' ').replace('-', ' ')
         if ext in {"docx", "pdf", "xlsx", "pptx"}:
             from app.document_generator import (
                 _build_docx,

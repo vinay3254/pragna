@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     chat_model: str = "gemma4:cloud"
     omniroute_base_url: str = "http://127.0.0.1:20128"
     omniroute_api_key: str | None = None
+    # Balanced design defaults; deployments can opt back into high reasoning.
+    design_model: str = "antigravity/gemini-3.7-flash-medium"
+    design_plan_model: str = "antigravity/gemini-3.7-flash-low"
+    design_fallback_model: str = "ollama-cloud/gemma4:31b"
     ollama_local_url: str = "http://localhost:11434"
     ollama_local_model: str = "gemma3"
     embed_model: str = "nomic-embed-text"

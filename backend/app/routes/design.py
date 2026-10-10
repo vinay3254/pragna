@@ -2,6 +2,7 @@ import json
 import io
 import zipfile
 import re
+import asyncio
 from urllib.parse import urlsplit, unquote
 
 from bs4 import BeautifulSoup
@@ -9,6 +10,7 @@ from bs4 import BeautifulSoup
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from app import design_service, repository
 from app.auth import get_current_user
@@ -24,6 +26,8 @@ class ProjectCreate(BaseModel):
     name: str = Field(design_service.DEFAULT_PROJECT_NAME, min_length=1, max_length=80)
     device: str = Field("mobile", pattern="^(mobile|web)$")
     theme: dict | None = None
+    kind: Literal['prototype','presentation','document','marketing'] = 'prototype'
+    design_system_id: int | None = None
 
 
 class ProjectUpdate(BaseModel):
@@ -35,6 +39,8 @@ class GenerateRequest(BaseModel):
     prompt: str = Field("", max_length=4000)
     image: str | None = Field(None, max_length=MAX_IMAGE_CHARS)
     add: bool = False
+    polish: bool = False
+    variants: int = Field(1, ge=1, le=3)
 
 
 class EditRequest(BaseModel):
@@ -64,6 +70,8 @@ def _screen_payload(project: dict, screen: dict) -> dict:
         "position": screen["position"],
         "version_id": screen["current_version_id"],
         "body": body,
+        'layout': screen.get('layout', {}),
+        "quality": design_service.screen_quality(body, project['theme'], project['device']) if body else None,
         "html": design_service.render_document(body, project["theme"], screen["id"], interactive=True) if body else None,
     }
 
@@ -78,6 +86,8 @@ def _own_project(request: Request, user: dict, project_id: int) -> dict:
     project = repository.get_design_project(request.app.state.conn, user["id"], project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if request.method not in ('GET', 'HEAD') and project['access_role'] not in ('owner', 'editor'):
+        raise HTTPException(status_code=403, detail='This project is view only. Ask its owner for edit access.')
     return project
 
 
@@ -87,7 +97,7 @@ def _own_screen(request: Request, user: dict, screen_id: int) -> tuple[dict, dic
     screen = repository.get_design_screen(conn, user["id"], screen_id)
     if not screen:
         raise HTTPException(status_code=404, detail="Screen not found")
-    return repository.get_design_project(conn, user["id"], screen["project_id"]), screen
+    return _own_project(request, user, screen['project_id']), screen
 
 
 def _valid_image(image: str | None) -> str | None:
@@ -137,7 +147,18 @@ async def create_project(request: Request, body: ProjectCreate, user: dict = Dep
     except DesignError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     conn = request.app.state.conn
+    system_id = body.design_system_id
+    if system_id is None and 'design_system_id' not in body.model_fields_set:
+        default = conn.execute('SELECT id FROM design_systems WHERE user_id=? AND is_default=1', (user['id'],)).fetchone()
+        system_id = default['id'] if default else None
+    if system_id:
+        system = conn.execute('SELECT theme FROM design_systems WHERE id=? AND user_id=?', (system_id,user['id'])).fetchone()
+        if not system:
+            raise HTTPException(404,'Design system not found')
+        theme = json.loads(system['theme'])
     project_id = repository.create_design_project(conn, user["id"], body.name, body.device, theme)
+    from app.routes.design_workspace import save_options
+    save_options(conn,project_id,body.kind,system_id,{})
     return _project_payload(conn, repository.get_design_project(conn, user["id"], project_id))
 
 
@@ -161,6 +182,8 @@ async def update_project(request: Request, project_id: int, body: ProjectUpdate,
 @router.delete("/api/design/projects/{project_id}")
 async def delete_project(request: Request, project_id: int, user: dict = Depends(get_current_user)):
     project = _own_project(request, user, project_id)
+    if project['access_role'] != 'owner':
+        raise HTTPException(status_code=403, detail='Only the owner can delete this project')
     repository.delete_design_project(request.app.state.conn, project["id"])
     return {"ok": True}
 
@@ -174,16 +197,39 @@ async def generate(request: Request, project_id: int, body: GenerateRequest, use
     conn, settings = request.app.state.conn, request.app.state.settings
 
     async def stream():
-        repository.add_design_message(conn, project_id, "user", body.prompt.strip() or "Design from this reference image")
-        events = design_service.generate_flow(conn, settings, project, body.prompt.strip(), image, body.add)
+        repository.add_design_message(conn, project_id, "user", body.prompt.strip() or "Design from this reference image", user_id=user['id'])
+        events = design_service.generate_flow(conn, settings, project, body.prompt.strip(), image, body.add, polish=body.polish, **({'variants': body.variants} if body.variants > 1 else {}))
         built, failed = set(), set()
+        direction = ''
         terminal = False
+        pending = None
         try:
-            async for event in events:
+            # Keep long reasoning calls alive through HTTP proxies; cancelling the client
+            # also cancels the model task instead of leaving an orphaned generator.
+            while True:
+                if pending is None:
+                    pending = asyncio.create_task(anext(events))
+                ready, _ = await asyncio.wait({pending}, timeout=15)
+                if not ready:
+                    yield ': keep-alive\n\n'
+                    continue
+                try:
+                    event = pending.result()
+                except StopAsyncIteration:
+                    break
+                finally:
+                    pending = None
+                if event['type'] == 'plan':
+                    direction = event.get('direction', '')
+                    event = {**event,'screens':[{**s,'layout':repository.get_design_screen(conn,user['id'],s['id']).get('layout',{})} for s in event['screens']]}
+                if event['type'] == 'screen_draft':
+                    event = {**event, 'html': design_service.render_document(
+                        event['body'], project['theme'], event['id'], interactive=False)}
                 if event["type"] == "screen":
                     built.add(event["id"])
                     # The page renders html, so send the finished document, not just the body.
-                    event = {**event, "html": design_service.render_document(
+                    event = {**event, "quality": design_service.screen_quality(event['body'], project['theme'], project['device']),
+                             "html": design_service.render_document(
                         event["body"], project["theme"], event["id"], interactive=True)}
                 elif event["type"] == "screen_error":
                     failed.add(event["id"])
@@ -195,6 +241,20 @@ async def generate(request: Request, project_id: int, body: GenerateRequest, use
                     message = f"Created {len(built)} screen{'s' if len(built) != 1 else ''}. Explore your design in Preview, or describe what to change."
                     if failed:
                         message += f" {len(failed)} screen(s) need a retry."
+                    if direction:
+                        message += f'\n\n**Design direction**\n{direction}'
+                    reports = [design_service.screen_quality(screen['body'], project['theme'], project['device'])
+                               for screen in repository.list_design_screens(conn, project_id)
+                               if screen['id'] in built and screen.get('body')]
+                    if reports:
+                        findings = sum(len(report['issues']) + len(report.get('browser', {}).get('issues', [])) for report in reports)
+                        checked = sum(report.get('browser', {}).get('status') == 'checked' for report in reports)
+                        message += '\n\n**Prototype review**\n'
+                        if checked:
+                            message += f'Browser smoke checks ran on {checked} screen(s). '
+                        else:
+                            message += 'Source checks ran; browser checks are unavailable. '
+                        message += f'{findings} finding(s) to review in Design checks.' if findings else 'No issues found by these checks.'
                     repository.add_design_message(conn, project_id, "assistant", message)
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
@@ -202,6 +262,9 @@ async def generate(request: Request, project_id: int, body: GenerateRequest, use
             repository.add_design_message(conn, project_id, "assistant", f"Generation failed: {exc}")
             yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
         finally:
+            if pending is not None:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
             if not terminal:
                 repository.add_design_message(conn, project_id, "assistant",
                     "Generation stopped. Completed screens are saved; retry any remaining screens.")
@@ -221,11 +284,15 @@ async def edit_screen(request: Request, screen_id: int, body: EditRequest, user:
     if not screen.get("body"):
         raise HTTPException(status_code=400, detail="This screen has no design to edit yet")
     conn = request.app.state.conn
-    context = "\n".join(f"{m['role']}: {m['content']}" for m in repository.list_design_messages(conn, project["id"])[-8:])[-8000:]
-    repository.add_design_message(conn, project["id"], "user", f"{screen['name']}: {body.instruction}")
+    from app.design_imports import design_context
+    context = "\n".join(f"{m['role']}: {m['content']}" for m in repository.list_design_messages(conn, project["id"])[-8:])[-8000:] + design_context(conn,project)
+    repository.add_design_message(conn, project["id"], "user", f"{screen['name']}: {body.instruction}", user_id=user['id'])
     try:
         updated = await design_service.edit_screen_body(
             request.app.state.settings, screen["body"], body.instruction, body.element_html, context=context
+        )
+        await design_service.design_browser_checks.check_document(
+            design_service.render_document(updated, project['theme'], 0, interactive=False), project['device'],
         )
     except DesignError as exc:
         repository.add_design_message(conn, project["id"], "assistant", f"Could not update {screen['name']}: {exc}")
@@ -248,13 +315,29 @@ async def regenerate_screen(request: Request, screen_id: int, body: RegenerateRe
         built = await design_service.generate_screen_body(
             request.app.state.settings, purpose, project["device"],
             {"name": screen["name"], "purpose": purpose}, [{"name": screen["name"], "purpose": purpose}],
+            theme=project['theme'],
+            **({'kind': project['kind']} if project.get('kind','prototype') != 'prototype' else {}),
         )
-        built = await design_service.illustrate(request.app.state.settings, built, purpose)
+        report = await design_service.design_browser_checks.check_document(
+            design_service.render_document(built, project['theme'], 0, interactive=False), project['device'],
+        )
+        source = design_service.screen_quality(built, project['theme'], project['device'])
+        if report['issues'] or source['issues']:
+            built = await design_service.refine_screen_body(
+                request.app.state.settings, built, {'name': screen['name'], 'purpose': purpose}, '', browser_issues=report['issues'],
+            )
+        built, photos_timed_out = await design_service.finish_photography(request.app.state.settings, built, purpose)
+        await design_service.design_browser_checks.check_document(
+            design_service.render_document(built, project['theme'], 0, interactive=False), project['device'],
+        )
     except DesignError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     conn = request.app.state.conn
     repository.add_screen_version(conn, screen_id, built, purpose)
-    repository.add_design_message(conn, project["id"], "assistant", f"Built {screen['name']}. It is ready to refine.")
+    message = f"Built {screen['name']}. It is ready to refine."
+    if photos_timed_out:
+        message += ' Photography timed out; some image slots may remain unfilled.'
+    repository.add_design_message(conn, project["id"], "assistant", message)
     return _screen_payload(project, repository.get_design_screen(conn, user["id"], screen_id))
 
 

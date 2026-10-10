@@ -22,10 +22,12 @@ import { useAuth } from '@/context/AuthContext';
 import {
   DEVICE_FRAME,
   DesignDevice,
+  DesignKind,
   DesignProject,
   designApi,
   setPendingStart,
 } from '@/lib/design';
+import { BrandSystem, workspaceApi } from '@/lib/designWorkspace';
 import BriefComposer from './components/BriefComposer';
 import { AppearanceButton, BackToPragna, DesignBrand, DesignMark } from './components/DesignChrome';
 
@@ -108,11 +110,7 @@ function StarterPreview({ kind }: { kind: string }) {
           </div>
           <div className="mt-3 flex h-10 items-end gap-1">
             {[20, 35, 26, 44, 32, 55, 48, 70, 55, 80, 68, 95].map((h, i) => (
-              <div
-                key={i}
-                style={{ height: `${h}%` }}
-                className="flex-1 rounded-t-sm bg-primary"
-              />
+              <div key={i} style={{ height: `${h}%` }} className="flex-1 rounded-t-sm bg-primary" />
             ))}
           </div>
         </div>
@@ -184,7 +182,7 @@ function Thumbnail({ project }: { project: DesignProject }) {
       {visible && width > 0 && html ? (
         <iframe
           title={`${project.name} preview`}
-          sandbox="allow-scripts"
+          sandbox="allow-scripts allow-forms"
           srcDoc={html}
           tabIndex={-1}
           aria-hidden
@@ -213,6 +211,15 @@ export default function DesignHomePage() {
   const briefSection = useRef<HTMLDivElement>(null);
   const projectsSection = useRef<HTMLElement>(null);
   const [prompt, setPrompt] = useState('');
+  const [kind, setKind] = useState<DesignKind>('prototype');
+  const [brand, setBrand] = useState<number | null | undefined>();
+  const [brands, setBrands] = useState<BrandSystem[]>([]);
+  useEffect(() => {
+    workspaceApi
+      .systems()
+      .then(setBrands)
+      .catch(() => {});
+  }, []);
   const [device, setDevice] = useState<DesignDevice>('web');
   const [image, setImage] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -233,12 +240,20 @@ export default function DesignHomePage() {
       );
   }, []);
   useEffect(load, [load]);
-  const create = async () => {
-    if (creating || (!prompt.trim() && !image)) return;
+  const create = async (blank = false) => {
+    if (creating || (!blank && !prompt.trim() && !image)) return;
     setCreating(true);
     try {
-      const { project } = await designApi.createProject(device);
-      setPendingStart({ projectId: project.id, prompt: prompt.trim(), image: image ?? undefined });
+      const { project } = await designApi.createProject(kind === 'prototype' ? device : 'web', {
+        kind,
+        ...(brand === undefined ? {} : { design_system_id: brand }),
+      });
+      if (!blank)
+        setPendingStart({
+          projectId: project.id,
+          prompt: prompt.trim(),
+          image: image ?? undefined,
+        });
       router.push(`/design/${project.id}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not create design');
@@ -310,9 +325,19 @@ export default function DesignHomePage() {
                 className="design-sidebar-project group flex min-h-10 items-start gap-2.5 rounded-lg px-3 py-2.5 text-[13px] leading-[18px] text-foreground transition-colors hover:bg-sidebar-hover"
               >
                 {p.device === 'web' ? (
-                  <Monitor size={15} strokeWidth={1.75} aria-hidden="true" className="mt-0.5 shrink-0 text-muted-foreground group-hover:text-primary" />
+                  <Monitor
+                    size={15}
+                    strokeWidth={1.75}
+                    aria-hidden="true"
+                    className="mt-0.5 shrink-0 text-muted-foreground group-hover:text-primary"
+                  />
                 ) : (
-                  <Smartphone size={15} strokeWidth={1.75} aria-hidden="true" className="mt-0.5 shrink-0 text-muted-foreground group-hover:text-primary" />
+                  <Smartphone
+                    size={15}
+                    strokeWidth={1.75}
+                    aria-hidden="true"
+                    className="mt-0.5 shrink-0 text-muted-foreground group-hover:text-primary"
+                  />
                 )}
                 <span className="min-w-0 break-words line-clamp-2">{p.name}</span>
               </Link>
@@ -338,7 +363,10 @@ export default function DesignHomePage() {
               </p>
             )}
             {loadError && (
-              <button onClick={load} className="min-h-9 rounded-lg px-3 text-xs text-muted-foreground hover:bg-sidebar-hover hover:text-foreground">
+              <button
+                onClick={load}
+                className="min-h-9 rounded-lg px-3 text-xs text-muted-foreground hover:bg-sidebar-hover hover:text-foreground"
+              >
                 Could not load projects. Retry
               </button>
             )}
@@ -355,7 +383,10 @@ export default function DesignHomePage() {
                 <p className="truncate text-[13px] font-medium" title={user?.name || user?.email}>
                   {user?.name || user?.email}
                 </p>
-                <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={user?.email}>
+                <p
+                  className="mt-0.5 truncate text-[11px] text-muted-foreground"
+                  title={user?.email}
+                >
                   {user?.email}
                 </p>
               </div>
@@ -395,6 +426,47 @@ export default function DesignHomePage() {
               Start with an idea. Shape it together. Make it yours.
             </p>
             <div className="text-left">
+              <div className="mb-3 grid grid-cols-2 gap-3">
+                <label className="text-xs text-muted-foreground">
+                  Format
+                  <select
+                    value={kind}
+                    onChange={(event) => setKind(event.target.value as DesignKind)}
+                    disabled={creating}
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground"
+                  >
+                    <option value="prototype">Interactive website or app</option>
+                    <option value="presentation">Presentation deck</option>
+                    <option value="document">Document or one-pager</option>
+                    <option value="marketing">Marketing or social asset</option>
+                  </select>
+                </label>
+                <label className="text-xs text-muted-foreground">
+                  Brand
+                  <select
+                    value={brand === undefined ? 'default' : brand || ''}
+                    onChange={(event) =>
+                      setBrand(
+                        event.target.value === 'default'
+                          ? undefined
+                          : event.target.value
+                            ? Number(event.target.value)
+                            : null
+                      )
+                    }
+                    disabled={creating}
+                    className="mt-1.5 min-h-11 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground"
+                  >
+                    <option value="default">Default brand</option>
+                    <option value="">No brand preset</option>
+                    {brands.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
               <BriefComposer
                 prompt={prompt}
                 onPrompt={setPrompt}
@@ -403,9 +475,16 @@ export default function DesignHomePage() {
                 image={image}
                 onImage={setImage}
                 busy={creating}
-                onSubmit={create}
+                onSubmit={() => create()}
               />
             </div>
+            <button
+              disabled={creating}
+              onClick={() => create(true)}
+              className="mt-4 min-h-10 rounded-lg border border-border px-4 text-xs hover:bg-muted disabled:opacity-40"
+            >
+              Import files or start blank
+            </button>
             <p className="mt-3 text-[11px] text-muted-foreground">
               Describe your audience, features, and visual direction. Or start with a reference
               image.

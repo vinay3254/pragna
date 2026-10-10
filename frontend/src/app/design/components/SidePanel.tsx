@@ -22,6 +22,9 @@ export interface ElementSelection {
   selector: string;
   text: string;
   canEdit: boolean;
+  styles?: Record<string, string>;
+  selectors?: string[];
+  versionId?: number;
 }
 interface Props {
   tab: PanelTab;
@@ -36,6 +39,8 @@ interface Props {
   onText: (text: string) => Promise<boolean>;
   busy: boolean;
   savingTheme: boolean;
+  onCanvas?: (operation: string, styles?: Record<string, string>) => Promise<boolean>;
+  onStylePreview?: (styles: Record<string, string> | null) => void;
 }
 
 const PRESETS: { name: string; theme: Partial<DesignTheme> }[] = [
@@ -96,6 +101,8 @@ export default function SidePanel({
   onText,
   busy,
   savingTheme,
+  onCanvas,
+  onStylePreview,
 }: Props) {
   return (
     <aside
@@ -144,7 +151,14 @@ export default function SidePanel({
             busy={busy}
           />
         ) : (
-          <Inspector selection={selection} onText={onText} busy={busy} screen={screen} />
+          <Inspector
+            selection={selection}
+            onText={onText}
+            busy={busy}
+            screen={screen}
+            onCanvas={onCanvas}
+            onStylePreview={onStylePreview}
+          />
         )}
       </div>
     </aside>
@@ -202,9 +216,9 @@ function ThemeControls({
             key={key}
             label={label}
             value={theme[key]}
-            onChange={color => onTheme({ ...theme, [key]: color })}
+            onChange={(color) => onTheme({ ...theme, [key]: color })}
             open={editingColor === key}
-            onToggle={() => setEditingColor(current => current === key ? null : key)}
+            onToggle={() => setEditingColor((current) => (current === key ? null : key))}
             disabled={busy}
           />
         ))}
@@ -276,11 +290,15 @@ function Inspector({
   onText,
   busy,
   screen,
+  onCanvas,
+  onStylePreview,
 }: {
   selection: ElementSelection | null;
   onText: (text: string) => Promise<boolean>;
   busy: boolean;
   screen: DesignScreen | null;
+  onCanvas?: (operation: string, styles?: Record<string, string>) => Promise<boolean>;
+  onStylePreview?: (styles: Record<string, string> | null) => void;
 }) {
   const [text, setText] = useState('');
   const [saving, setSaving] = useState(false);
@@ -300,6 +318,15 @@ function Inspector({
               &lt;{selection.tag}&gt;
             </p>
           </div>
+          {onCanvas && (
+            <CanvasControls
+              key={selection.selector + ':' + screen?.version_id}
+              selection={selection}
+              busy={busy}
+              onCanvas={onCanvas}
+              onPreview={onStylePreview}
+            />
+          )}
           {selection.canEdit ? (
             <>
               <label className="mt-5 block text-xs font-medium" htmlFor="element-text">
@@ -346,6 +373,141 @@ function Inspector({
           <p className="mt-3 text-xs text-muted-foreground">Your selection appears here.</p>
         </div>
       )}
+    </div>
+  );
+}
+
+function CanvasControls({
+  selection,
+  busy,
+  onCanvas,
+  onPreview,
+}: {
+  selection: ElementSelection;
+  busy: boolean;
+  onCanvas: (operation: string, styles?: Record<string, string>) => Promise<boolean>;
+  onPreview?: (styles: Record<string, string> | null) => void;
+}) {
+  const [styles, setStyles] = useState<Record<string, string>>({});
+  const preview = (property: string, value: string) => {
+    const next = { ...styles, [property]: value };
+    setStyles(next);
+    onPreview?.(next);
+  };
+  return (
+    <div className="mt-5 space-y-4 border-t border-border pt-4">
+      <h3 className="text-xs font-semibold">Live adjustments</h3>
+      {(
+        [
+          { key: 'font-size', label: 'Text size', max: 120, fallback: 16 },
+          { key: 'padding', label: 'Padding', max: 100, fallback: 0 },
+          { key: 'gap', label: 'Gap', max: 80, fallback: 0 },
+          { key: 'border-radius', label: 'Corners', max: 80, fallback: 0 },
+        ] as const
+      ).map((control) => {
+        const value =
+          parseFloat(styles[control.key] || selection.styles?.[control.key] || '') ||
+          control.fallback;
+        return (
+          <label key={control.key} className="block text-xs">
+            <span className="flex justify-between">
+              {control.label}
+              <output>{Math.round(value)}px</output>
+            </span>
+            <input
+              type="range"
+              aria-label={control.label}
+              min={control.key === 'font-size' ? 8 : 0}
+              max={control.max}
+              value={Math.min(value, control.max)}
+              disabled={busy}
+              onChange={(e) => preview(control.key, e.target.value + 'px')}
+              className="mt-2 min-h-8 w-full"
+            />
+          </label>
+        );
+      })}
+      <div className="grid grid-cols-2 gap-3">
+        {(['color', 'background-color'] as const).map((key) => (
+          <label key={key} className="text-xs">
+            {key === 'color' ? 'Text color' : 'Fill'}
+            <input
+              type="color"
+              disabled={busy}
+              value={
+                (styles[key] || selection.styles?.[key] || '#ffffff').startsWith('#')
+                  ? styles[key] || selection.styles?.[key] || '#ffffff'
+                  : '#ffffff'
+              }
+              onChange={(e) => preview(key, e.target.value)}
+              className="mt-2 h-9 w-full rounded border border-border"
+            />
+          </label>
+        ))}
+      </div>
+      <label className="block text-xs">
+        Alignment
+        <select
+          className="mt-2 w-full rounded-lg border border-border bg-card px-2 py-2.5"
+          disabled={busy}
+          value={styles['text-align'] || selection.styles?.['text-align'] || 'left'}
+          onChange={(e) => preview('text-align', e.target.value)}
+        >
+          {['left', 'center', 'right', 'justify'].map((value) => (
+            <option key={value}>{value}</option>
+          ))}
+        </select>
+      </label>
+      <div className="flex gap-2">
+        <button
+          disabled={busy || !Object.keys(styles).length}
+          onClick={() => onCanvas('style', styles)}
+          className="min-h-10 flex-1 rounded-lg bg-primary px-2 text-xs text-primary-foreground disabled:opacity-40"
+        >
+          Save adjustments
+        </button>
+        <button
+          disabled={busy || !Object.keys(styles).length}
+          onClick={() => {
+            setStyles({});
+            onPreview?.(null);
+          }}
+          className="min-h-10 rounded-lg border border-border px-2 text-xs disabled:opacity-40"
+        >
+          Revert
+        </button>
+      </div>
+      <p className="text-[11px] leading-5 text-muted-foreground">
+        Ctrl/Cmd + click selects several layers for grouping. Alt + drag moves the selected element.
+        Drag its corner to resize. Double-click text to edit directly.
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        {[
+          { operation: 'duplicate', label: 'Duplicate' },
+          { operation: 'delete', label: 'Delete' },
+          { operation: 'move-earlier', label: 'Move earlier' },
+          { operation: 'move-later', label: 'Move later' },
+          { operation: 'group', label: 'Group' },
+          { operation: 'ungroup', label: 'Ungroup' },
+          { operation: 'flip-horizontal', label: 'Flip horizontal' },
+          { operation: 'flip-vertical', label: 'Flip vertical' },
+        ].map((action) => (
+          <button
+            key={action.operation}
+            disabled={busy}
+            onClick={() => {
+              if (
+                action.operation !== 'delete' ||
+                window.confirm('Delete this element? You can restore it from History.')
+              )
+                onCanvas(action.operation);
+            }}
+            className="min-h-10 rounded-lg border border-border bg-card px-2 text-xs hover:bg-muted disabled:opacity-40"
+          >
+            {action.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

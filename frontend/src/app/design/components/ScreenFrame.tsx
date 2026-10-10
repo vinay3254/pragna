@@ -173,7 +173,7 @@ export default function ScreenFrame({
           <iframe
             ref={(el) => registerFrame(screen.id, el)}
             title={screen.name}
-            sandbox="allow-scripts"
+            sandbox="allow-scripts allow-forms"
             srcDoc={screen.html ?? ''}
             onLoad={() => onReady(screen.id)}
             style={{ width, height, background }}

@@ -2,10 +2,16 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { useParams, useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import {
   ArrowLeft,
+  Wrench,
+  Undo2,
+  Redo2,
+  Presentation,
   ArrowUp,
   Check,
   ChevronDown,
@@ -34,17 +40,24 @@ import {
   Type,
   X,
 } from 'lucide-react';
+import ProjectTools from '../components/ProjectTools';
+import { workspaceApi, downloadDesign, DesignComment } from '@/lib/designWorkspace';
+import { API_BASE, getAuthToken } from '@/lib/api';
 import ScreenFrame from '../components/ScreenFrame';
 import SidePanel, { ElementSelection, PanelTab } from '../components/SidePanel';
 import { AppearanceButton, DesignMark } from '../components/DesignChrome';
+import { DesignChecks, DesignDirection, GenerationSteps } from '../components/DesignFeedback';
 import {
   DEVICE_FRAME,
   DesignDevice,
+  DesignBrief,
+  DesignIssue,
   DesignMessage,
   DesignProject,
   DesignScreen,
   DesignTheme,
   GenerateEvent,
+  GenerationStage,
   designApi,
   downloadDataUrl,
   downloadProjectZip,
@@ -77,6 +90,7 @@ const newMessage = (role: DesignMessage['role'], content: string): DesignMessage
 });
 
 export default function DesignCanvasPage() {
+  const router = useRouter();
   const { id } = useParams<{ id: string }>();
   const projectId = Number(id);
   const [project, setProject] = useState<DesignProject | null>(null);
@@ -91,6 +105,10 @@ export default function DesignCanvasPage() {
   const [selection, setSelection] = useState<ElementSelection | null>(null);
   const [operation, setOperation] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [generationStage, setGenerationStage] = useState<GenerationStage>('planning');
+  const [designBrief, setDesignBrief] = useState<DesignBrief>({});
+  const [direction, setDirection] = useState('');
+  const [runtimeErrors, setRuntimeErrors] = useState<Record<number, string[]>>({});
   const [stopping, setStopping] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [prompt, setPrompt] = useState('');
@@ -104,12 +122,25 @@ export default function DesignCanvasPage() {
   const [tool, setTool] = useState<'select' | 'hand'>('select');
   const [chatOpen, setChatOpen] = useState(true);
   const [sideTab, setSideTab] = useState<'chat' | 'screens'>('chat');
+  const [showTools, setShowTools] = useState(false);
+  const [presenting, setPresenting] = useState(false);
+  const [guides, setGuides] = useState(false);
+  const [aiDemo, setAiDemo] = useState(false);
+  const aiDemoRef = useRef(false);
+  aiDemoRef.current = aiDemo;
+  const pendingSelect = useRef<{ id: number; selector: string } | null>(null);
+  const commandRef = useRef<(data: Record<string, unknown>, owner: number) => void>(() => {});
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [savingTheme, setSavingTheme] = useState(false);
   const [previewWidth, setPreviewWidth] = useState(1280);
   const [viewportSize, setViewportSize] = useState({ width: 800, height: 600 });
 
+  const presentationFrame = useRef<HTMLIFrameElement>(null);
+  const presentingRef = useRef(false);
+  presentingRef.current = presenting;
+  const currentArtboard = useRef<number | null>(null);
+  currentArtboard.current = activeId;
   const viewportRef = useRef<HTMLDivElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -119,6 +150,7 @@ export default function DesignCanvasPage() {
   const captures = useRef(
     new Map<number, { resolve: (url: string) => void; reject: (error: Error) => void }>()
   );
+  const selectedVersions = useRef(new Map<number, number>());
   const purposes = useRef(new Map<number, string>());
   const screensRef = useRef<DesignScreen[]>([]);
   const projectRef = useRef<DesignProject | null>(null);
@@ -132,27 +164,42 @@ export default function DesignCanvasPage() {
   const drag = useRef<{ x: number; y: number } | null>(null);
   const startedAt = useRef(0);
   const mounted = useRef(true);
-  const receivedScreen = useRef(false);
   const previewGeneratedDesign = useRef(false);
+  const [variants, setVariants] = useState(1);
+  const [extraPolish, setExtraPolish] = useState(false);
 
   screensRef.current = screens;
   projectRef.current = project;
   modeRef.current = mode;
   const busy = operation !== null;
   const device = project?.device ?? 'web';
-  const frame = DEVICE_FRAME[device];
+  const baseFrame = DEVICE_FRAME[device];
+  const frame = {
+    width: screens.find((s) => s.id === activeId)?.layout?.width || baseFrame.width,
+    height: screens.find((s) => s.id === activeId)?.layout?.height || baseFrame.height,
+  };
+  const canEdit = !project?.access_role || ['owner', 'editor'].includes(project.access_role);
   const activeScreen = screens.find((s) => s.id === activeId) ?? null;
-  const builtCount = screens.filter((s) => s.html).length;
+  const builtCount = screens.filter((s) => s.version_id !== null && s.html).length;
   const editableScreens = screens.filter((s) => s.body);
 
   const fitView = useCallback((count: number, dev: DesignDevice) => {
     const el = viewportRef.current;
     if (!el || count < 1) return;
-    const f = DEVICE_FRAME[dev],
-      cols = Math.min(count, COLUMNS[dev]),
-      rows = Math.ceil(count / COLUMNS[dev]);
-    const width = cols * f.width + (cols - 1) * GAP,
-      height = rows * (f.height + FRAME_HEADER) + (rows - 1) * GAP;
+    const f = DEVICE_FRAME[dev];
+    const bounds = Array.from({ length: count }, (_, i) => {
+      const layout = screensRef.current[i]?.layout;
+      return {
+        x: layout?.x ?? (i % COLUMNS[dev]) * (f.width + GAP),
+        y: layout?.y ?? Math.floor(i / COLUMNS[dev]) * (f.height + FRAME_HEADER + GAP),
+        width: layout?.width || f.width,
+        height: (layout?.height || f.height) + FRAME_HEADER,
+      };
+    });
+    const minX = Math.min(...bounds.map((b) => b.x)),
+      minY = Math.min(...bounds.map((b) => b.y));
+    const width = Math.max(...bounds.map((b) => b.x + b.width)) - minX,
+      height = Math.max(...bounds.map((b) => b.y + b.height)) - minY;
     const scale = clamp(
       Math.min((el.clientWidth - 80) / width, (el.clientHeight - 100) / height),
       MIN_SCALE,
@@ -160,15 +207,19 @@ export default function DesignCanvasPage() {
     );
     setView({
       scale,
-      x: (el.clientWidth - width * scale) / 2,
-      y: (el.clientHeight - height * scale) / 2,
+      x: (el.clientWidth - width * scale) / 2 - minX * scale,
+      y: (el.clientHeight - height * scale) / 2 - minY * scale,
     });
   }, []);
   const focusScreen = (screen: DesignScreen) => {
     const el = viewportRef.current;
     if (!el) return;
     const index = screensRef.current.findIndex((s) => s.id === screen.id);
-    const f = DEVICE_FRAME[projectRef.current?.device ?? 'web'];
+    const base = DEVICE_FRAME[projectRef.current?.device ?? 'web'];
+    const f = {
+      width: screen.layout?.width || base.width,
+      height: screen.layout?.height || base.height,
+    };
     const scale = clamp(
       Math.min(
         (el.clientWidth - 80) / f.width,
@@ -180,10 +231,12 @@ export default function DesignCanvasPage() {
     const cols = COLUMNS[projectRef.current?.device ?? 'web'];
     setView({
       scale,
-      x: (el.clientWidth - f.width * scale) / 2 - (index % cols) * (f.width + GAP) * scale,
+      x:
+        (el.clientWidth - f.width * scale) / 2 -
+        (screen.layout?.x ?? (index % cols) * (base.width + GAP)) * scale,
       y:
         (el.clientHeight - (f.height + FRAME_HEADER) * scale) / 2 -
-        Math.floor(index / cols) * (f.height + FRAME_HEADER + GAP) * scale,
+        (screen.layout?.y ?? Math.floor(index / cols) * (base.height + FRAME_HEADER + GAP)) * scale,
     });
   };
   const zoomBy = (factor: number) => {
@@ -271,6 +324,7 @@ export default function DesignCanvasPage() {
 
   useEffect(() => {
     let cancelled = false;
+    const captureRequests = captures.current;
     mounted.current = true;
     setLoading(true);
     setLoadError(null);
@@ -314,22 +368,27 @@ export default function DesignCanvasPage() {
       mounted.current = false;
       abortRef.current?.abort();
       if (themeTimer.current) clearTimeout(themeTimer.current);
-      captures.current.forEach((capture) => capture.reject(new Error('Canvas closed')));
-      captures.current.clear();
+      captureRequests.forEach((capture) => capture.reject(new Error('Canvas closed')));
+      captureRequests.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, reload]);
 
-  const sendMode = useCallback(
-    (id: number) =>
+  const sendMode = useCallback((id: number) => {
+    frames.current
+      .get(id)
+      ?.contentWindow?.postMessage(
+        { type: 'mode', mode: modeRef.current === 'preview' ? 'preview' : 'select' },
+        '*'
+      );
+    if (pendingSelect.current?.id === id) {
+      const target = pendingSelect.current;
       frames.current
         .get(id)
-        ?.contentWindow?.postMessage(
-          { type: 'mode', mode: modeRef.current === 'preview' ? 'preview' : 'select' },
-          '*'
-        ),
-    []
-  );
+        ?.contentWindow?.postMessage({ type: 'select-selector', selector: target.selector }, '*');
+      pendingSelect.current = null;
+    }
+  }, []);
   const registerFrame = useCallback((id: number, el: HTMLIFrameElement | null) => {
     if (el) frames.current.set(id, el);
     else frames.current.delete(id);
@@ -342,23 +401,70 @@ export default function DesignCanvasPage() {
     const onMessage = (e: MessageEvent) => {
       const data = e.data;
       if (!data || data.source !== 'pragna-design') return;
+      if (
+        presentingRef.current &&
+        e.source === presentationFrame.current?.contentWindow &&
+        data.screenId === currentArtboard.current
+      ) {
+        if (data.type === 'ready')
+          presentationFrame.current?.contentWindow?.postMessage(
+            { type: 'mode', mode: 'presentation' },
+            '*'
+          );
+        if (data.type === 'presentation-close') setPresenting(false);
+        if (data.type === 'presentation-step')
+          setActiveId((current) => {
+            const list = screensRef.current;
+            const index = list.findIndex((screen) => screen.id === current);
+            return (
+              list[clamp(index + (data.delta === 1 ? 1 : -1), 0, list.length - 1)]?.id ?? current
+            );
+          });
+        return;
+      }
       let owner: number | null = null;
       frames.current.forEach((el, id) => {
         if (el.contentWindow === e.source) owner = id;
       });
       if (owner === null || owner !== data.screenId) return;
       if (data.type === 'ready') sendMode(owner);
+      if (
+        [
+          'canvas-change',
+          'canvas-command',
+          'text-edit',
+          'history-command',
+          'ai-request',
+          'voice-request',
+        ].includes(data.type)
+      )
+        commandRef.current(data, owner);
+      if (data.type === 'runtime-error') {
+        const screenId = owner;
+        const error = String(data.error ?? 'Prototype script error').slice(0, 500);
+        setRuntimeErrors((previous) => ({
+          ...previous,
+          [screenId]: [...new Set([...(previous[screenId] ?? []), error])].slice(0, 5),
+        }));
+      }
       if (data.type === 'select' && modeRef.current === 'canvas') {
+        const version = screensRef.current.find((screen) => screen.id === owner)?.version_id;
+        if (version) selectedVersions.current.set(owner, version);
         frames.current.forEach((el, id) => {
           if (id !== owner) el.contentWindow?.postMessage({ type: 'clear' }, '*');
         });
         setSelection({
           screenId: owner,
+          versionId: version ?? undefined,
           tag: String(data.tag),
           html: String(data.html),
           selector: String(data.selector ?? ''),
           text: String(data.text ?? ''),
           canEdit: data.canEdit === true,
+          styles: data.styles,
+          selectors: Array.isArray(data.selectors)
+            ? data.selectors.slice(0, 30).map(String)
+            : undefined,
         });
         setActiveId(owner);
         setScope('screen');
@@ -370,7 +476,9 @@ export default function DesignCanvasPage() {
         let href = String(data.href ?? '');
         try {
           href = decodeURIComponent(href);
-        } catch {}
+        } catch {
+          // Keep the original destination when it contains malformed URL escapes.
+        }
         const names = [
           normalize(String(data.label ?? '')),
           normalize(href.replace(/^.*\//, '').replace(/\.html?(?:[?#].*)?$/, '')),
@@ -406,6 +514,7 @@ export default function DesignCanvasPage() {
       return next;
     });
   const replaceScreen = (updated: DesignScreen) => {
+    setRuntimeErrors((previous) => ({ ...previous, [updated.id]: [] }));
     setSelection((selected) => (selected?.screenId === updated.id ? null : selected));
     setScreens((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
   };
@@ -415,7 +524,9 @@ export default function DesignCanvasPage() {
     try {
       const detail = await designApi.getProject(projectId);
       if (mounted.current) setMessages(detail.messages ?? []);
-    } catch {}
+    } catch {
+      // Keep the current conversation visible while a transient reload fails.
+    }
   };
   const begin = (label: string) => {
     if (busyRef.current || themeWriting.current || themeQueue.current) return false;
@@ -434,7 +545,21 @@ export default function DesignCanvasPage() {
     }
   };
   const onGenerateEvent = (event: GenerateEvent) => {
-    if (event.type === 'plan') {
+    if (event.type === 'status') {
+      setGenerationStage(event.stage);
+      setOperation(event.message);
+    } else if (event.type === 'quality') {
+      setScreens((previous) =>
+        previous.map((screen) =>
+          screen.id === event.id && screen.version_id === event.version_id && screen.quality
+            ? { ...screen, quality: { ...screen.quality, browser: event.browser } }
+            : screen
+        )
+      );
+    } else if (event.type === 'plan') {
+      setGenerationStage('building');
+      setDesignBrief(event.design_brief ?? {});
+      setDirection(event.direction ?? '');
       const prevCount = screensRef.current.length;
       setProject((p) =>
         p ? { ...p, name: event.project_name || p.name, theme: event.theme ?? p.theme } : p
@@ -450,6 +575,7 @@ export default function DesignCanvasPage() {
           version_id: null,
           body: null,
           html: null,
+          layout: s.layout,
         })),
       ]);
       event.screens.forEach((s) => purposes.current.set(s.id, s.purpose));
@@ -458,8 +584,24 @@ export default function DesignCanvasPage() {
       requestAnimationFrame(() =>
         fitView(prevCount + event.screens.length, projectRef.current?.device ?? 'web')
       );
+    } else if (event.type === 'notice') {
+      toast.info(event.message);
+    } else if (event.type === 'screen_draft') {
+      // Drafts are visible, but only completed versions can be edited or exported.
+      setScreens((previous) =>
+        previous.map((screen) =>
+          screen.id === event.id && screen.version_id === null
+            ? { ...screen, html: event.html }
+            : screen
+        )
+      );
+      setActiveId((id) => id ?? event.id);
+      if (previewGeneratedDesign.current) {
+        setMode('preview');
+        previewGeneratedDesign.current = false;
+      }
     } else if (event.type === 'screen') {
-      receivedScreen.current = true;
+      setRuntimeErrors((previous) => ({ ...previous, [event.id]: [] }));
       if (previewGeneratedDesign.current) {
         setMode('preview');
         previewGeneratedDesign.current = false;
@@ -468,7 +610,13 @@ export default function DesignCanvasPage() {
       setScreens((prev) =>
         prev.map((s) =>
           s.id === event.id
-            ? { ...s, version_id: event.version_id, body: event.body, html: event.html }
+            ? {
+                ...s,
+                version_id: event.version_id,
+                body: event.body,
+                html: event.html,
+                quality: event.quality,
+              }
             : s
         )
       );
@@ -481,6 +629,11 @@ export default function DesignCanvasPage() {
       });
     } else if (event.type === 'screen_error') {
       setErrors((prev) => ({ ...prev, [event.id]: event.error }));
+      setScreens((previous) =>
+        previous.map((screen) =>
+          screen.id === event.id && screen.version_id === null ? { ...screen, html: null } : screen
+        )
+      );
       markDone(event.id);
     } else if (event.type === 'error') {
       toast.error(event.error);
@@ -489,17 +642,26 @@ export default function DesignCanvasPage() {
   };
 
   async function runGenerate(text: string, img: string | undefined, add: boolean) {
+    if (!canEdit) return;
     if (!begin(add ? 'Planning another screen' : 'Planning your design')) return;
     const controller = new AbortController();
     abortRef.current = controller;
-    receivedScreen.current = false;
     previewGeneratedDesign.current = !add;
     setGenerating(true);
+    setGenerationStage('planning');
+    setDesignBrief({});
+    setDirection('');
     append('user', text || 'Design from this reference image');
     try {
       await streamGenerate(
         projectId,
-        { prompt: text, image: img, add },
+        {
+          prompt: text,
+          image: img,
+          add,
+          polish: extraPolish,
+          variants: project?.kind === 'presentation' ? 1 : variants,
+        },
         onGenerateEvent,
         controller.signal
       );
@@ -535,6 +697,11 @@ export default function DesignCanvasPage() {
     } finally {
       abortRef.current = null;
       if (mounted.current) {
+        setScreens((previous) =>
+          previous.map((screen) =>
+            screen.version_id === null ? { ...screen, html: null } : screen
+          )
+        );
         setGenerating(false);
         setStopping(false);
       }
@@ -547,7 +714,7 @@ export default function DesignCanvasPage() {
     action: () => Promise<DesignScreen>,
     label: string
   ) {
-    if (!begin(label)) return false;
+    if (!canEdit || !begin(label)) return false;
     setBuilding(new Set([screen.id]));
     try {
       replaceScreen(await action());
@@ -629,6 +796,19 @@ export default function DesignCanvasPage() {
       () => designApi.regenerateScreen(screen.id, purposes.current.get(screen.id)),
       `Building ${screen.name}`
     );
+  const repairIssues = async (issues: DesignIssue[]) => {
+    if (!activeScreen?.body) return;
+    clearSelection();
+    const instruction = (
+      'Repair these specific issues while preserving the design, content, working controls and theme tokens:\n' +
+      issues.map((issue) => `- ${issue.message}`).join('\n')
+    ).slice(0, 2000);
+    await runScreenAction(
+      activeScreen,
+      () => designApi.editScreen(activeScreen.id, instruction),
+      'Repairing prototype issues'
+    );
+  };
   const restore = async (versionId: number) => {
     if (!activeScreen) return;
     const ok = await runScreenAction(
@@ -647,7 +827,12 @@ export default function DesignCanvasPage() {
     const ok = await runScreenAction(
       activeScreen,
       () =>
-        designApi.updateText(selected.screenId, selected.selector, text, activeScreen.version_id!),
+        designApi.updateText(
+          selected.screenId,
+          selected.selector,
+          text,
+          selected.versionId ?? activeScreen.version_id!
+        ),
       `Saving text in ${activeScreen.name}`
     );
     if (ok) {
@@ -656,8 +841,322 @@ export default function DesignCanvasPage() {
     }
     return ok;
   };
+  const task = async (label: string, action: () => Promise<unknown>) => {
+    if (!begin(label)) return;
+    try {
+      await action();
+      const detail = await designApi.getProject(projectId);
+      setProject(detail.project);
+      setScreens(detail.screens);
+      setMessages(detail.messages || []);
+      setNameDraft(detail.project.name);
+      savedTheme.current = detail.project.theme;
+      setActiveId((current) =>
+        detail.screens.some((screen) => screen.id === current)
+          ? current
+          : (detail.screens[0]?.id ?? null)
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Action failed');
+    } finally {
+      finish();
+    }
+  };
+  const selectLayer = (selector: string, screenId: number) => {
+    pendingSelect.current = { id: screenId, selector };
+    setActiveId(screenId);
+    setMode('canvas');
+    setTool('select');
+    if (modeRef.current === 'canvas' && frames.current.has(screenId)) sendMode(screenId);
+  };
+  const canvasAction = async (
+    operation: string,
+    styles: Record<string, string> = {},
+    target = selection
+  ) => {
+    const screen = screensRef.current.find((item) => item.id === target?.screenId);
+    if (!target || !screen?.version_id || !canEdit) return false;
+    return runScreenAction(
+      screen,
+      () =>
+        workspaceApi.canvas(
+          screen.id,
+          target.selector,
+          operation,
+          target.versionId ?? screen.version_id!,
+          styles,
+          operation === 'group' ? target.selectors : undefined
+        ),
+      'Saving canvas changes'
+    );
+  };
+  const stylePreview = (styles: Record<string, string> | null) => {
+    if (selection)
+      frames.current
+        .get(selection.screenId)
+        ?.contentWindow?.postMessage({ type: 'style-preview', styles }, '*');
+  };
+  const historyStep = async (redo: boolean, screenId = activeId) => {
+    const screen = screensRef.current.find((item) => item.id === screenId);
+    if (!screen?.version_id || !canEdit || busyRef.current) return;
+    try {
+      const versions = await designApi.listVersions(screen.id);
+      const index = versions.findIndex((v) => v.id === screen.version_id);
+      const target = versions[index + (redo ? -1 : 1)];
+      if (target)
+        await runScreenAction(
+          screen,
+          () => designApi.restoreVersion(screen.id, target.id),
+          redo ? 'Redoing edit' : 'Undoing edit'
+        );
+      else toast.info(redo ? 'No newer version' : 'No earlier version');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'History unavailable');
+    }
+  };
+  const applyComment = async (comment: DesignComment) => {
+    const screen = screensRef.current.find((item) => item.id === comment.screen_id);
+    if (!screen?.body) return;
+    let element: string | undefined;
+    if (comment.selector) {
+      try {
+        element = new DOMParser()
+          .parseFromString(screen.body, 'text/html')
+          .querySelector(comment.selector)?.outerHTML;
+      } catch {
+        /* Missing comment anchors fall back to a screen edit. */
+      }
+    }
+    const ok = await runScreenAction(
+      screen,
+      () => designApi.editScreen(screen.id, comment.content, element),
+      'Applying comment'
+    );
+    if (ok) {
+      await workspaceApi.resolve(projectId, comment.id, true);
+      setShowTools(false);
+    }
+  };
+  commandRef.current = (data, owner) => {
+    if (data.type === 'voice-request') {
+      const requestId = String(data.requestId || '').slice(0, 80),
+        reply = (content: string, error = false) =>
+          frames.current
+            .get(owner)
+            ?.contentWindow?.postMessage(
+              { type: 'voice-response', requestId, content, error },
+              '*'
+            );
+      if (modeRef.current !== 'preview' || !canEdit) {
+        reply('Voice input is available in the editable preview.', true);
+        return;
+      }
+      type Recognition = {
+        start: () => void;
+        stop: () => void;
+        lang: string;
+        continuous: boolean;
+        interimResults: boolean;
+        onresult:
+          ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+        onerror: ((event: { error: string }) => void) | null;
+        onend: (() => void) | null;
+      };
+      const globals = window as unknown as {
+        SpeechRecognition?: new () => Recognition;
+        webkitSpeechRecognition?: new () => Recognition;
+      };
+      const Constructor = globals.SpeechRecognition || globals.webkitSpeechRecognition;
+      if (!Constructor) {
+        reply('Voice input is unavailable in this browser. Type your request instead.', true);
+        return;
+      }
+      const recognition = new Constructor();
+      let done = false;
+      const timeout = setTimeout(() => {
+        recognition.stop();
+        if (!done) {
+          done = true;
+          reply('No speech heard. Try again.', true);
+        }
+      }, 14000);
+      const finishVoice = (content: string, error = false) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timeout);
+        reply(content, error);
+      };
+      recognition.lang = navigator.language;
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      recognition.onresult = (event) => finishVoice(event.results[0]?.[0]?.transcript || '');
+      recognition.onerror = (event) =>
+        finishVoice(`Voice input: ${event.error}. You can type instead.`, true);
+      recognition.onend = () => {
+        if (!done) finishVoice('No speech heard. Try again.', true);
+      };
+      try {
+        recognition.start();
+      } catch {
+        finishVoice('Microphone unavailable. Check browser permission or type instead.', true);
+      }
+      return;
+    }
+    if (data.type === 'ai-request') {
+      const requestId = String(data.requestId || '').slice(0, 80),
+        reply = (content: string, error = false) =>
+          frames.current
+            .get(owner)
+            ?.contentWindow?.postMessage({ type: 'ai-response', requestId, content, error }, '*');
+      if (!aiDemoRef.current || !canEdit) {
+        reply('Enable AI demo in the Pragna preview toolbar to use this feature.', true);
+        return;
+      }
+      if (busyRef.current) {
+        reply('Please wait for the current operation.', true);
+        return;
+      }
+      const text = String(data.prompt || '').slice(0, 2000);
+      if (!text.trim()) return;
+      task('Running AI demo', async () => {
+        try {
+          reply((await workspaceApi.assistant(owner, text)).content);
+        } catch (error) {
+          reply(error instanceof Error ? error.message : 'AI unavailable', true);
+        }
+      });
+      return;
+    }
+    if (!canEdit || busyRef.current || modeRef.current !== 'canvas') return;
+    if (data.type === 'history-command') {
+      historyStep(data.redo === true, owner);
+      return;
+    }
+    const target = {
+      screenId: owner,
+      selector: String(data.selector || ''),
+      versionId: selectedVersions.current.get(owner),
+      selectors: Array.isArray(data.selectors)
+        ? data.selectors.slice(0, 30).map(String)
+        : undefined,
+      tag: '',
+      html: '',
+      text: '',
+      canEdit: true,
+    };
+    if (data.type === 'canvas-change')
+      canvasAction('style', data.styles as Record<string, string>, target);
+    if (data.type === 'canvas-command') {
+      const operation = String(data.operation);
+      if (operation !== 'delete' || window.confirm('Delete selected element?'))
+        canvasAction(operation, {}, target);
+    }
+    if (data.type === 'text-edit') {
+      const screen = screensRef.current.find((item) => item.id === owner);
+      if (screen?.version_id)
+        runScreenAction(
+          screen,
+          () =>
+            designApi.updateText(
+              owner,
+              target.selector,
+              String(data.text).slice(0, 4000),
+              target.versionId ?? screen.version_id!
+            ),
+          'Saving text'
+        );
+    }
+  };
+  useEffect(() => {
+    if (!projectId || loading) return;
+    let previous = '',
+      stopped = false;
+    const poll = async () => {
+      if (
+        busyRef.current ||
+        themeWriting.current ||
+        themeQueue.current ||
+        document.hidden ||
+        stopped
+      )
+        return;
+      try {
+        const token = getAuthToken();
+        const res = await fetch(`${API_BASE}/api/design/projects/${projectId}/revision`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (previous && previous !== data.revision) {
+          const detail = await designApi.getProject(projectId);
+          if (!stopped && !busyRef.current) {
+            setSelection((selected) => {
+              if (
+                selected &&
+                detail.screens.find((screen) => screen.id === selected.screenId)?.version_id !==
+                  selected.versionId
+              ) {
+                frames.current
+                  .get(selected.screenId)
+                  ?.contentWindow?.postMessage({ type: 'clear' }, '*');
+                return null;
+              }
+              return selected;
+            });
+            setProject(detail.project);
+            setScreens(detail.screens);
+            setMessages(detail.messages || []);
+            savedTheme.current = detail.project.theme;
+            setNameDraft(detail.project.name);
+          }
+        }
+        previous = data.revision;
+      } catch {
+        /* Retry on the next collaboration poll. */
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 8000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [projectId, loading]);
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if ((event.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]'))
+        return;
+      if (presenting) {
+        if (event.key === 'Escape') setPresenting(false);
+        if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+          event.preventDefault();
+          const index = screens.findIndex((s) => s.id === activeId);
+          setActiveId(
+            screens[
+              Math.max(
+                0,
+                Math.min(screens.length - 1, index + (event.key === 'ArrowRight' ? 1 : -1))
+              )
+            ]?.id ?? null
+          );
+        }
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        historyStep(event.shiftKey);
+      }
+      if (event.shiftKey && event.key.toLowerCase() === 'g') setGuides((value) => !value);
+      if (event.key === 'Escape') {
+        setShowTools(false);
+        stylePreview(null);
+      }
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  });
   const removeScreen = async (screen: DesignScreen) => {
-    if (!begin(`Deleting ${screen.name}`)) return;
+    if (!canEdit || !begin(`Deleting ${screen.name}`)) return;
     try {
       await designApi.deleteScreen(screen.id);
       setScreens((prev) => {
@@ -824,15 +1323,8 @@ export default function DesignCanvasPage() {
         : selection
           ? `What should change in this ${selection.tag}?`
           : `How should ${activeScreen?.name ?? 'this screen'} change?`;
-  const progressLabel =
-    generating && receivedScreen.current && building.size === 0
-      ? 'Polishing details and adding images'
-      : operation;
-  const previewScale = clamp(
-    (viewportSize.width - 32) / previewWidth,
-    0.1,
-    1
-  );
+  const progressLabel = operation;
+  const previewScale = clamp((viewportSize.width - 32) / previewWidth, 0.1, 1);
 
   return (
     <div className="flex h-full flex-col">
@@ -868,7 +1360,7 @@ export default function DesignCanvasPage() {
               e.currentTarget.blur();
             }
           }}
-          disabled={loading || busy}
+          disabled={loading || busy || !canEdit}
           maxLength={80}
           aria-label="Project name"
           placeholder="Loading design…"
@@ -891,6 +1383,46 @@ export default function DesignCanvasPage() {
           )}
         </span>
         <div className="ml-auto flex items-center gap-1">
+          <button
+            onClick={() => {
+              setShowTools((value) => !value);
+              setPanel(null);
+            }}
+            className="design-icon-button"
+            aria-label="Project tools"
+            title="Brands, sources, comments, sharing and exports"
+            aria-pressed={showTools}
+          >
+            <Wrench size={17} />
+          </button>
+          <button
+            onClick={() => historyStep(false)}
+            disabled={!activeScreen?.version_id || busy || !canEdit}
+            className="design-icon-button hidden sm:flex"
+            aria-label="Undo"
+          >
+            <Undo2 size={17} />
+          </button>
+          <button
+            onClick={() => historyStep(true)}
+            disabled={!activeScreen?.version_id || busy || !canEdit}
+            className="design-icon-button hidden sm:flex"
+            aria-label="Redo"
+          >
+            <Redo2 size={17} />
+          </button>
+          {builtCount > 0 && (
+            <button
+              onClick={() => {
+                setPresenting(true);
+                setMode('preview');
+              }}
+              className="design-icon-button"
+              aria-label="Present artboards"
+            >
+              <Presentation size={17} />
+            </button>
+          )}
           <AppearanceButton />
           <button
             onClick={() => setPanel((p) => (p === 'theme' ? null : 'theme'))}
@@ -910,6 +1442,16 @@ export default function DesignCanvasPage() {
           >
             <History size={17} />
           </button>
+          {mode === 'preview' && canEdit && (
+            <label className="hidden min-h-10 items-center gap-2 px-2 text-xs sm:flex">
+              <input
+                type="checkbox"
+                checked={aiDemo}
+                onChange={(event) => setAiDemo(event.target.checked)}
+              />
+              AI demo
+            </label>
+          )}
           <div ref={exportRef} className="relative">
             <button
               disabled={!builtCount || busy || savingTheme || exporting}
@@ -943,6 +1485,24 @@ export default function DesignCanvasPage() {
                     </p>
                   </div>
                 </button>
+                {(['pdf', 'pptx', 'handoff'] as const).map((format) => (
+                  <button
+                    key={format}
+                    role="menuitem"
+                    className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs hover:bg-muted"
+                    onClick={() => {
+                      setExportOpen(false);
+                      task('Exporting ' + format, () => downloadDesign(projectId, format));
+                    }}
+                  >
+                    <Download size={15} />
+                    {format === 'handoff'
+                      ? 'Coding handoff (.zip)'
+                      : format === 'pptx'
+                        ? 'PowerPoint (.pptx)'
+                        : 'Document (.pdf)'}
+                  </button>
+                ))}
                 <div className="my-1 border-t border-border" />
                 <button
                   role="menuitem"
@@ -1033,6 +1593,11 @@ export default function DesignCanvasPage() {
                       key={message.id}
                       className={`design-message ${message.role === 'user' ? 'ml-3 rounded-xl bg-muted px-4 py-3' : 'pr-1'}`}
                     >
+                      {message.role === 'user' && message.author_name && (
+                        <p className="mb-1 text-[10px] font-medium text-muted-foreground">
+                          {message.author_name}
+                        </p>
+                      )}
                       {message.role === 'assistant' && (
                         <div className="mb-2 flex items-center gap-1.5 text-xs font-medium">
                           <span className="text-primary">
@@ -1041,9 +1606,17 @@ export default function DesignCanvasPage() {
                           Pragna
                         </div>
                       )}
-                      <p className="whitespace-pre-wrap break-words text-xs leading-[1.85]">
-                        {message.content}
-                      </p>
+                      {message.role === 'assistant' ? (
+                        <div className="design-response break-words text-xs leading-[1.85]">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {message.content}
+                          </ReactMarkdown>
+                        </div>
+                      ) : (
+                        <p className="whitespace-pre-wrap break-words text-xs leading-[1.85]">
+                          {message.content}
+                        </p>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1055,9 +1628,10 @@ export default function DesignCanvasPage() {
                     </div>
                     <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
                       {generating
-                        ? 'Thoughtful screens take a few minutes. You can explore completed screens while the rest take shape.'
+                        ? 'Explore the first draft while Pragna checks interactions and refines the final design.'
                         : 'Your existing design stays visible while this change runs.'}
                     </p>
+                    {generating && <GenerationSteps stage={generationStage} />}
                     <div className="mt-3 flex items-center justify-between text-[10px] text-muted-foreground">
                       <span>
                         {generating ? `${builtCount} screens on canvas` : 'Saving a new version'}
@@ -1080,6 +1654,15 @@ export default function DesignCanvasPage() {
                       </button>
                     )}
                   </div>
+                )}
+                <DesignDirection brief={designBrief} direction={direction} />
+                {activeScreen?.html && (
+                  <DesignChecks
+                    quality={activeScreen.quality}
+                    runtimeErrors={runtimeErrors[activeScreen.id] ?? []}
+                    busy={busy || savingTheme}
+                    onRepair={repairIssues}
+                  />
                 )}
                 <div ref={chatEnd} />
               </div>
@@ -1141,7 +1724,7 @@ export default function DesignCanvasPage() {
                 Apply to
                 <select
                   value={scope}
-                  disabled={busy || savingTheme}
+                  disabled={busy || savingTheme || !canEdit}
                   onChange={(e) => {
                     setScope(e.target.value as Scope);
                     clearSelection();
@@ -1256,6 +1839,7 @@ export default function DesignCanvasPage() {
                       loading ||
                       busy ||
                       savingTheme ||
+                      !canEdit ||
                       (!prompt.trim() && !(image && scope === 'add')) ||
                       (scope === 'screen' && !activeScreen?.body)
                     }
@@ -1267,6 +1851,33 @@ export default function DesignCanvasPage() {
                   </button>
                 </div>
               </div>
+              {scope === 'add' && (
+                <>
+                  <label className="mt-2 flex min-h-9 items-center gap-2 px-1 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={extraPolish}
+                      disabled={busy}
+                      onChange={(event) => setExtraPolish(event.target.checked)}
+                    />
+                    Extra design polish (takes longer)
+                  </label>
+                  <label className="mt-2 flex min-h-10 items-center gap-2 text-xs text-muted-foreground">
+                    Design directions
+                    <select
+                      aria-label="Design directions"
+                      disabled={busy || !!image || project?.kind === 'presentation' || !canEdit}
+                      value={variants}
+                      onChange={(event) => setVariants(Number(event.target.value))}
+                      className="min-h-9 rounded-md border border-border bg-card px-2"
+                    >
+                      <option value={1}>1 · fastest</option>
+                      <option value={2}>2 alternatives</option>
+                      <option value={3}>3 alternatives</option>
+                    </select>
+                  </label>
+                </>
+              )}
               <p className="mt-2 text-center text-[10px] text-muted-foreground">
                 {scope === 'add'
                   ? screens.length
@@ -1304,7 +1915,10 @@ export default function DesignCanvasPage() {
                   key={value}
                   onClick={() => setCanvasMode(value)}
                   aria-pressed={mode === value}
-                  disabled={value !== 'canvas' && !builtCount}
+                  disabled={
+                    (value === 'preview' && !screens.some((screen) => screen.html)) ||
+                    (value === 'code' && !builtCount)
+                  }
                   className={`flex min-h-8 items-center gap-1.5 rounded-md px-2.5 text-xs disabled:opacity-40 ${mode === value ? 'bg-card shadow-sm' : 'text-muted-foreground'}`}
                 >
                   <Icon size={13} />
@@ -1365,7 +1979,7 @@ export default function DesignCanvasPage() {
                   </select>
                 )}
                 {mode === 'preview' && (
-                  <div className="hidden items-center gap-0.5 lg:flex">
+                  <div className="flex items-center gap-0.5">
                     {(
                       [
                         { width: 1280, label: 'Desktop preview', Icon: Monitor },
@@ -1431,19 +2045,21 @@ export default function DesignCanvasPage() {
                       key={screen.id}
                       className="absolute"
                       style={{
-                        left: (i % COLUMNS[device]) * (frame.width + GAP),
-                        top: Math.floor(i / COLUMNS[device]) * (frame.height + FRAME_HEADER + GAP),
+                        left: screen.layout?.x ?? (i % COLUMNS[device]) * (baseFrame.width + GAP),
+                        top:
+                          screen.layout?.y ??
+                          Math.floor(i / COLUMNS[device]) * (baseFrame.height + FRAME_HEADER + GAP),
                       }}
                     >
                       <ScreenFrame
                         screen={screen}
-                        width={frame.width}
-                        height={frame.height}
+                        width={screen.layout?.width || baseFrame.width}
+                        height={screen.layout?.height || baseFrame.height}
                         background={project?.theme.background ?? 'transparent'}
                         building={building.has(screen.id)}
                         error={errors[screen.id]}
                         active={activeId === screen.id}
-                        busy={busy || savingTheme}
+                        busy={busy || savingTheme || !canEdit}
                         registerFrame={registerFrame}
                         onReady={sendMode}
                         onActivate={() => activate(screen)}
@@ -1521,6 +2137,31 @@ export default function DesignCanvasPage() {
               </>
             ) : mode === 'preview' && activeScreen?.html ? (
               <>
+                {!!runtimeErrors[activeScreen.id]?.length && (
+                  <div
+                    role="alert"
+                    className="absolute inset-x-4 top-4 z-10 flex items-center gap-3 rounded-xl border border-amber-500/40 bg-card px-4 py-3 shadow-lg"
+                  >
+                    <p className="flex-1 text-xs">
+                      This prototype has a script error. Pragna can repair it.
+                    </p>
+                    <button
+                      disabled={busy || savingTheme || !canEdit}
+                      onClick={() =>
+                        repairIssues(
+                          (runtimeErrors[activeScreen.id] ?? []).map((message) => ({
+                            code: 'runtime_error',
+                            message,
+                            severity: 'error',
+                          }))
+                        )
+                      }
+                      className="min-h-10 rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-40"
+                    >
+                      Repair
+                    </button>
+                  </div>
+                )}
                 <div className="absolute inset-0 overflow-auto">
                   <div
                     className="relative mx-auto my-4"
@@ -1535,7 +2176,7 @@ export default function DesignCanvasPage() {
                       onLoad={() => sendMode(activeScreen.id)}
                       title={`${activeScreen.name} interactive preview`}
                       srcDoc={activeScreen.html}
-                      sandbox="allow-scripts"
+                      sandbox="allow-scripts allow-forms"
                       className="absolute left-0 top-0 rounded-lg border border-border bg-card shadow-xl"
                       style={{
                         width: previewWidth,
@@ -1581,7 +2222,29 @@ export default function DesignCanvasPage() {
             )}
           </div>
         </div>
-        {panel && project && (
+        {showTools && project && (
+          <ProjectTools
+            project={project}
+            screens={screens}
+            screen={activeScreen}
+            selection={selection}
+            busy={busy || savingTheme}
+            onClose={() => setShowTools(false)}
+            onSelect={selectLayer}
+            onTask={task}
+            onCommentEdit={applyComment}
+            onExplore={() => {
+              if (activeScreen)
+                runGenerate(
+                  `Create an alternative design direction for ${activeScreen.name}. Preserve its purpose and content, use a distinct composition. Current content: ${activeScreen.body?.replace(/<[^>]+>/g, ' ').slice(0, 2500)}`,
+                  undefined,
+                  true
+                );
+            }}
+            onFork={(id) => router.push(`/design/${id}`)}
+          />
+        )}
+        {panel && project && !showTools && (
           <SidePanel
             tab={panel}
             onTab={setPanel}
@@ -1593,11 +2256,80 @@ export default function DesignCanvasPage() {
             onRestore={restore}
             selection={selection}
             onText={updateText}
-            busy={busy}
+            onCanvas={canvasAction}
+            onStylePreview={stylePreview}
+            busy={busy || !canEdit}
             savingTheme={savingTheme}
           />
         )}
       </div>
+      {guides && mode === 'canvas' && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 z-20"
+          style={{
+            backgroundImage:
+              'linear-gradient(to right, transparent 49.9%, #b9945644 50%, transparent 50.1%), linear-gradient(to bottom, transparent 49.9%, #b9945644 50%, transparent 50.1%)',
+          }}
+        />
+      )}
+      {presenting && activeScreen?.html && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Presentation"
+          className="fixed inset-0 z-[100] flex flex-col bg-background"
+        >
+          <div className="flex min-h-14 items-center gap-3 border-b border-border px-4">
+            <span className="flex-1 text-sm">
+              {activeScreen.name} · {screens.findIndex((s) => s.id === activeId) + 1} /{' '}
+              {screens.length}
+            </span>
+            <button
+              onClick={() =>
+                setActiveId(
+                  screens[Math.max(0, screens.findIndex((s) => s.id === activeId) - 1)].id
+                )
+              }
+              className="design-icon-button"
+              aria-label="Previous artboard"
+            >
+              <ArrowLeft size={18} />
+            </button>
+            <button
+              onClick={() =>
+                setActiveId(
+                  screens[
+                    Math.min(screens.length - 1, screens.findIndex((s) => s.id === activeId) + 1)
+                  ].id
+                )
+              }
+              className="design-icon-button"
+              aria-label="Next artboard"
+            >
+              <ChevronRight size={18} />
+            </button>
+            <button
+              autoFocus
+              onClick={() => setPresenting(false)}
+              className="design-icon-button"
+              aria-label="Close presentation"
+            >
+              <X size={18} />
+            </button>
+          </div>
+          <iframe
+            ref={presentationFrame}
+            title={activeScreen.name + ' presentation'}
+            srcDoc={activeScreen.html}
+            onLoad={(event) =>
+              event.currentTarget.contentWindow?.postMessage({ type: 'mode', mode: 'preview' }, '*')
+            }
+            sandbox="allow-scripts allow-forms"
+            className="min-h-0 w-full flex-1 border-0"
+          />
+        </div>
+      )}
     </div>
   );
 }

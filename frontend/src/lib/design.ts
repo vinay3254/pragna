@@ -1,6 +1,14 @@
 import { API_BASE, getAuthToken } from '@/lib/api';
 
 export type DesignDevice = 'mobile' | 'web';
+export type DesignKind = 'prototype' | 'presentation' | 'document' | 'marketing';
+export type DesignRole = 'owner' | 'editor' | 'commenter' | 'viewer';
+export interface ArtboardLayout {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+}
 
 export interface DesignTheme {
   primary: string;
@@ -21,6 +29,10 @@ export interface DesignProject {
   theme: DesignTheme;
   created_at: string;
   updated_at: string;
+  kind?: DesignKind;
+  access_role?: DesignRole;
+  design_system_id?: number | null;
+  settings?: Record<string, unknown>;
   /** Present on list responses: the first built screen as a static document, for thumbnails. */
   preview_html?: string | null;
   screen_count?: number;
@@ -35,7 +47,42 @@ export interface DesignScreen {
   body: string | null;
   /** Full document for the sandboxed iframe, rendered by the server from the project theme. */
   html: string | null;
+  quality?: DesignQuality | null;
+  layout?: ArtboardLayout;
 }
+
+export interface DesignIssue {
+  code: string;
+  message: string;
+  severity: 'error' | 'warning';
+}
+
+export interface BrowserChecks {
+  status: 'checked' | 'unavailable';
+  widths: number[];
+  buttons_checked: number;
+  issues: DesignIssue[];
+}
+
+export interface DesignQuality {
+  kind: 'source';
+  issues: DesignIssue[];
+  controls: number;
+  local_actions: number;
+  has_custom_script: boolean;
+  browser?: BrowserChecks;
+}
+
+export interface DesignBrief {
+  audience?: string;
+  goal?: string;
+  sections?: string[];
+  interactions?: { trigger: string; result: string }[];
+  states?: string[];
+  responsive?: string;
+}
+
+export type GenerationStage = 'planning' | 'building' | 'refining' | 'images';
 
 export interface DesignProjectDetail {
   project: DesignProject;
@@ -48,6 +95,7 @@ export interface DesignMessage {
   role: 'user' | 'assistant';
   content: string;
   created_at: string;
+  author_name?: string | null;
 }
 
 export interface DesignVersion {
@@ -61,9 +109,22 @@ export type GenerateEvent =
       type: 'plan';
       project_name: string;
       theme: DesignTheme;
-      screens: { id: number; name: string; purpose: string }[];
+      direction?: string;
+      design_brief?: DesignBrief;
+      screens: { id: number; name: string; purpose: string; layout?: ArtboardLayout }[];
     }
-  | { type: 'screen'; id: number; version_id: number; body: string; html: string }
+  | { type: 'status'; stage: GenerationStage; message: string; id?: number }
+  | { type: 'screen_draft'; id: number; body: string; html: string }
+  | { type: 'notice'; message: string }
+  | { type: 'quality'; id: number; version_id: number; browser: BrowserChecks }
+  | {
+      type: 'screen';
+      id: number;
+      version_id: number;
+      body: string;
+      html: string;
+      quality?: DesignQuality;
+    }
   | { type: 'screen_error'; id: number; error: string }
   | { type: 'error'; error: string }
   | { type: 'done' };
@@ -126,8 +187,10 @@ const send = (method: string, body?: unknown): RequestInit => ({
 export const designApi = {
   listProjects: () => request<DesignProject[]>('/projects?include_previews=false'),
   getPreview: (id: number) => request<{ html: string | null }>(`/projects/${id}/preview`),
-  createProject: (device: DesignDevice) =>
-    request<DesignProjectDetail>('/projects', send('POST', { device })),
+  createProject: (
+    device: DesignDevice,
+    options: { kind?: DesignKind; design_system_id?: number | null } = {}
+  ) => request<DesignProjectDetail>('/projects', send('POST', { device, ...options })),
   getProject: (id: number) => request<DesignProjectDetail>(`/projects/${id}`),
   updateProject: (id: number, patch: { name?: string; theme?: DesignTheme }) =>
     request<DesignProjectDetail>(`/projects/${id}`, send('PATCH', patch)),
@@ -153,7 +216,7 @@ export const designApi = {
 /** Streams generation events (SSE over fetch, so the auth header can be sent). */
 export async function streamGenerate(
   projectId: number,
-  body: { prompt: string; image?: string; add?: boolean },
+  body: { prompt: string; image?: string; add?: boolean; polish?: boolean; variants?: number },
   onEvent: (event: GenerateEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {

@@ -11,20 +11,34 @@ import logging
 import re
 import time
 import urllib.parse
+from functools import lru_cache
+from collections.abc import Awaitable, Callable
+from contextlib import aclosing
+from pathlib import Path
 from typing import AsyncGenerator
 
 import httpx
 
-from app import image_service, repository
+from app import design_browser_checks, image_service, repository
+from app.design_quality import contrast_ratio, inspect_body
+from app.design_imports import design_context
 from app.ollama_client import chat_stream
 
 logger = logging.getLogger(__name__)
 
 STOCK = "stock"
-# Code comes from Gemini 3.7 Flash; Codex is used for pictures only (same models as the chat image tool).
-# The same model and output budget the Pragna CLI uses for design work: the high-reasoning variant, 64k tokens.
-DESIGN_MODEL = "antigravity/gemini-3.7-flash-high"
-DESIGN_MAX_TOKENS = 65536
+# Codex is used for pictures only. Planning needs less reasoning than page construction.
+DESIGN_MODEL = "antigravity/gemini-3.7-flash-medium"
+PLAN_MODEL = "antigravity/gemini-3.7-flash-low"
+DESIGN_MAX_TOKENS = 24576
+PLAN_MAX_TOKENS = 2048
+PLAN_TIMEOUT_SECONDS = 25
+REFINE_TIMEOUT_SECONDS = 60
+PHOTO_TIMEOUT_SECONDS = 30
+PREVIEW_INTERVAL_SECONDS = .8
+FIRST_TOKEN_TIMEOUT_SECONDS = 20
+MODEL_COOLDOWN_SECONDS = 90
+_model_blocked_until: dict[tuple[str, str], float] = {}
 # Picture sources in order: Codex, then a public-domain photo from Wikimedia Commons, then Gemini image.
 IMAGE_SOURCES = ("codex/gpt-5.6-terra", "codex/gpt-5.6-luna", STOCK, "antigravity/gemini-3.1-flash-image")
 PROVIDER_COOLDOWN_SECONDS = 60
@@ -51,7 +65,7 @@ DEFAULT_THEME = {
     "surface": "#ffffff",
     "background": "#f6f6f9",
     "foreground": "#111827",
-    "muted": "#6b7280",
+    "muted": "#666d7a",
     "border": "#e5e7eb",
     "radius": "12px",
     "font": "Inter",
@@ -83,83 +97,10 @@ def validate_theme(theme: dict | None) -> dict:
 
 # --- Rendering -------------------------------------------------------------
 
-_SELECT_SCRIPT = """
-<script>
-(function () {
-  var SID = %(screen_id)d, hover = null, picked = null, mode = 'select', ACCENT = '%(accent)s';
-  var originals = new WeakMap();
-  function send(type, data) { parent.postMessage(Object.assign({ source: 'pragna-design', type: type, screenId: SID }, data || {}), '*'); }
-  function mark(el, on) {
-    if (!el || !el.style) return;
-    if (on) {
-      if (!originals.has(el)) originals.set(el, [el.style.outline, el.style.outlineOffset]);
-      el.style.outline = '2px solid ' + ACCENT; el.style.outlineOffset = '-2px';
-    } else if (originals.has(el)) {
-      var old = originals.get(el); el.style.outline = old[0]; el.style.outlineOffset = old[1]; originals.delete(el);
-    }
-  }
-  function clear() { mark(hover, false); mark(picked, false); hover = null; picked = null; }
-  function path(el) {
-    var parts = [];
-    while (el && el !== document.body) {
-      var index = Array.prototype.indexOf.call(el.parentElement.children, el) + 1;
-      parts.unshift(el.tagName.toLowerCase() + ':nth-child(' + index + ')'); el = el.parentElement;
-    }
-    return 'body > ' + parts.join(' > ');
-  }
-  document.addEventListener('mouseover', function (e) {
-    if (mode !== 'select') return;
-    if (hover && hover !== picked) mark(hover, false);
-    hover = e.target; if (hover !== picked) mark(hover, true);
-  });
-  document.addEventListener('mouseleave', function () { if (hover !== picked) mark(hover, false); hover = null; });
-  document.addEventListener('click', function (e) {
-    if (mode === 'preview') {
-      var link = e.target.closest('a');
-      if (link) {
-        e.preventDefault();
-        var href = link.getAttribute('href') || '';
-        if (href.charAt(0) === '#') {
-          var target = document.getElementById(href.slice(1));
-          if (target) { target.scrollIntoView({ behavior: 'smooth' }); return; }
-        }
-        send('navigate', { href: href, label: link.textContent.trim() });
-      }
-      return;
-    }
-    if (e.target === document.body || e.target === document.documentElement) return;
-    e.preventDefault(); e.stopPropagation(); clear(); picked = e.target;
-    var canEdit = picked.children.length === 0 && ['SCRIPT','STYLE','INPUT','TEXTAREA','IMG','SVG','PATH','IFRAME'].indexOf(picked.tagName) < 0;
-    send('select', { tag: picked.tagName.toLowerCase(), html: picked.outerHTML.slice(0, 6000),
-      selector: path(picked), text: picked.textContent.trim().slice(0,4000), canEdit: canEdit });
-    mark(picked, true);
-  }, true);
-  document.addEventListener('submit', function (e) { e.preventDefault(); });
-  window.addEventListener('message', function (e) {
-    if (e.source !== parent) return;
-    var m = e.data || {};
-    if (m.type === 'clear') clear();
-    if (m.type === 'mode') { clear(); mode = m.mode === 'preview' ? 'preview' : 'select'; }
-    if (m.type === 'capture') {
-      clear();
-      function capture() {
-        window.htmlToImage.toPng(document.body, { pixelRatio: 2 }).then(function (url) {
-          send('png', { url: url });
-        }).catch(function (err) { send('png-error', { error: String(err) }); });
-      }
-      if (window.htmlToImage) capture();
-      else {
-        var script = document.createElement('script');
-        script.src = 'https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js';
-        script.onload = capture; script.onerror = function () { send('png-error', { error: 'Could not load the image exporter' }); };
-        document.head.appendChild(script);
-      }
-    }
-  });
-  send('ready');
-})();
-</script>
-"""
+@lru_cache(maxsize=1)
+def _editor_script(screen_id: int, accent: str) -> str:
+    source = Path(__file__).with_name('design_editor.js').read_text(encoding='utf-8')
+    return '<script>' + source.replace('__SCREEN_ID__', str(screen_id)).replace('__ACCENT__', accent) + '</script>'
 
 
 def _inner_body(html: str) -> str:
@@ -181,6 +122,11 @@ def themed_placeholders(body: str, theme: dict) -> str:
 # A downloaded file has no frontend to ask, so exports keep the CDN link.
 _TAILWIND_LOCAL = "/vendor/tailwindcss-play-3.4.17.js"
 _TAILWIND_CDN = "https://cdn.tailwindcss.com"
+
+
+@lru_cache(maxsize=1)
+def _prototype_script() -> str:
+    return Path(__file__).with_name('design_runtime.js').read_text(encoding='utf-8')
 
 
 def render_document(body: str, theme: dict, screen_id: int, interactive: bool, standalone: bool = False) -> str:
@@ -210,9 +156,10 @@ def render_document(body: str, theme: dict, screen_id: int, interactive: bool, s
             }
         }
     }
-    script = _SELECT_SCRIPT % {"screen_id": screen_id, "accent": t["primary"]} if interactive else ""
+    script = _editor_script(screen_id, t["primary"]) if interactive else ""
+    prototype = f'<script>{_prototype_script()}</script>' if 'data-design-' in body else ''
     return (
-        '<!doctype html><html><head><meta charset="utf-8">'
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<style>html{{background:{t["background"]}}}</style>'
         f'<script src="{_TAILWIND_CDN if standalone else _TAILWIND_LOCAL}"></script>'
@@ -220,31 +167,88 @@ def render_document(body: str, theme: dict, screen_id: int, interactive: bool, s
         '&family=Playfair+Display:ital,wght@0,600;0,700;1,600&family=JetBrains+Mono:wght@400;500&display=swap"'
         ' rel="stylesheet" media="print" onload="this.media=\'all\'">'
         f"<script>tailwind.config = {json.dumps(config)};</script>"
-        f"<style>html,body{{margin:0}}*{{scrollbar-width:thin;scrollbar-color:{t['border']} transparent}}</style></head>"
-        f'<body class="bg-background text-foreground font-theme">{themed_placeholders(body, t)}{script}</body></html>'
+        f"<style>html,body{{margin:0}}*{{scrollbar-width:thin;scrollbar-color:{t['border']} transparent}}"
+        "[hidden]{display:none!important}img,svg{max-width:100%}"
+        f":focus-visible{{outline:2px solid {t['primary']};outline-offset:3px}}"
+        "@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;"
+        "animation:none!important;transition:none!important}}</style>"
+        f"{script}{prototype}</head>"
+        f'<body class="bg-background text-foreground font-theme">{themed_placeholders(body, t)}</body></html>'
     )
+
+
+def screen_quality(body: str, theme: dict, device: str) -> dict:
+    report = inspect_body(body, theme)
+    browser = design_browser_checks.cached_report(render_document(body, theme, 0, interactive=False), device)
+    if browser:
+        report['browser'] = browser
+    return report
 
 
 # --- LLM plumbing ----------------------------------------------------------
 
-async def _llm(settings, messages: list[dict]) -> str:
-    """One OmniRoute completion, collected. Tests replace this."""
+async def _llm(
+    settings, messages: list[dict], *, stage: str = 'building',
+    on_partial: Callable[[str], Awaitable[None]] | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Collect a completion while forwarding bounded, throttled draft snapshots."""
     if not settings.omniroute_api_key:
         raise DesignError("OmniRoute is not configured (OMNIROUTE_API_KEY is empty)")
 
+    planning = stage == 'planning'
+    model = getattr(settings, 'design_plan_model', PLAN_MODEL) if planning else getattr(settings, 'design_model', DESIGN_MODEL)
+    timeout = PLAN_TIMEOUT_SECONDS if planning else REFINE_TIMEOUT_SECONDS if stage == 'refining' else LLM_TIMEOUT_SECONDS
+    started = time.monotonic()
+    async def tokens():
+        candidates = list(dict.fromkeys([model, getattr(settings, 'design_fallback_model', '')]))
+        for candidate in filter(None, candidates):
+            key = (settings.omniroute_base_url, candidate.split('/')[0])
+            if _model_blocked_until.get(key, 0) > time.monotonic():
+                continue
+            async with aclosing(chat_stream(
+                messages, candidate, settings.omniroute_base_url, api_keys=[settings.omniroute_api_key],
+                max_tokens=max_tokens or (PLAN_MAX_TOKENS if planning else DESIGN_MAX_TOKENS),
+            )) as stream:
+                try:
+                    first_token = await asyncio.wait_for(anext(stream), 10 if planning else FIRST_TOKEN_TIMEOUT_SECONDS)
+                except (TimeoutError, StopAsyncIteration, httpx.HTTPError, RuntimeError) as exc:
+                    _model_blocked_until[key] = time.monotonic() + MODEL_COOLDOWN_SECONDS
+                    logger.warning('Design %s unavailable before output (%s); trying fallback', candidate, type(exc).__name__)
+                    continue
+                # Never concatenate two models after a draft has started streaming.
+                yield first_token
+                async for token in stream:
+                    yield token
+                return
+        raise DesignError('Design models are busy or unavailable. Please retry shortly or configure DESIGN_FALLBACK_MODEL.')
+
     async def run() -> str:
         parts: list[str] = []
-        async for token in chat_stream(
-            messages, DESIGN_MODEL, settings.omniroute_base_url, api_keys=[settings.omniroute_api_key],
-            max_tokens=DESIGN_MAX_TOKENS,
-        ):
-            parts.append(token)
+        size = 0
+        last_preview = 0.0
+        first = True
+        async with aclosing(tokens()) as stream:
+            async for token in stream:
+                if first:
+                    logger.info('Design %s first token after %.2fs', stage, time.monotonic() - started)
+                    first = False
+                parts.append(token)
+                size += len(token.encode('utf-8'))
+                if size > MAX_BODY_BYTES:
+                    raise DesignError('The generated screen is too large')
+                now = time.monotonic()
+                if on_partial and size >= 120 and now - last_preview >= PREVIEW_INTERVAL_SECONDS:
+                    await on_partial(''.join(parts))
+                    last_preview = now
         return "".join(parts)
 
     try:
-        return await asyncio.wait_for(run(), LLM_TIMEOUT_SECONDS)
+        result = await asyncio.wait_for(run(), timeout)
+        logger.info('Design %s completed after %.2fs', stage, time.monotonic() - started)
+        return result
     except asyncio.TimeoutError:
-        raise DesignError(f"The model took longer than {LLM_TIMEOUT_SECONDS}s to answer")
+        raise DesignError(f"The model took longer than {timeout}s to answer")
     except DesignError:
         raise
     except Exception as exc:
@@ -270,6 +274,29 @@ def parse_html_block(text: str) -> str | None:
     m = re.search(r"```html\s*\n([\s\S]*?)```", text) or re.search(r"```\w*\s*\n([\s\S]*?)```", text)
     candidate = m.group(1) if m else (text if text.lstrip().startswith("<") else "")
     body = strip_emoji(_inner_body(candidate))
+    return body if body else None
+
+
+def preview_body(text: str) -> str | None:
+    """Render incomplete model markup as an inert draft, never execute partial scripts."""
+    from bs4 import BeautifulSoup
+    fence = re.search(r'```(?:html)?\s*\n', text)
+    candidate = text[fence.end():] if fence else text.lstrip()
+    if not candidate.startswith('<'):
+        return None
+    candidate = candidate.split('```', 1)[0]
+    # Cut dangling tags and script/style tails before letting the HTML parser recover nesting.
+    candidate = candidate[:candidate.rfind('>') + 1]
+    candidate = re.sub(r'<(script|style)\b[\s\S]*?(?:</\1\s*>|$)', '', candidate, flags=re.I)
+    soup = BeautifulSoup(candidate, 'html.parser')
+    for tag in soup.find_all(['script', 'iframe', 'object', 'embed', 'link', 'meta', 'base']):
+        tag.decompose()
+    for tag in soup.find_all(True):
+        for attr in list(tag.attrs):
+            value = tag.attrs[attr]
+            if attr.lower().startswith('on') or (attr in ('href', 'src', 'action', 'formaction') and str(value).lstrip().lower().startswith('javascript:')):
+                del tag.attrs[attr]
+    body = strip_emoji(_inner_body(str(soup))).strip()
     return body if body else None
 
 
@@ -313,15 +340,18 @@ _SCREEN_SYSTEM = (
     "https://placehold.co/WIDTHxHEIGHT?text=Short+description+of+the+photo (the description is used to find or "
     "generate the real picture, so make it specific). Icons: inline SVG. No other external URLs.\n"
     "- Make it look finished: spacing, hierarchy, states, consistent components across screens.\n"
-    "- Make it usable as a prototype: include a small, self-contained script at the end for tabs, filters, "
-    "menus, dialogs, toggles and demo forms when these controls are present. Use local demo data only. "
+    "- Make it usable as a prototype. Use the built-in interaction attributes below for standard controls. "
+    "Include a small, self-contained script at the end only for domain logic such as calculators, charts, "
+    "cart totals, CRUD demo data and compound filtering. Use local demo data only; clearly identify sample data. "
     "Never use fetch, network requests, storage, parent/top access, postMessage, or external scripts. "
     "When building a single design, implement all requested views within this one HTML body: "
     "local navigation switches panels, detail actions reveal content, and forms update demo state. "
     "Do not split the brief into separate mockups or link to pages that are not part of the project. "
     "Use real anchors with href equal to the destination screen name for navigation between planned screens. "
     "Keep this prototype code and all interaction states intact when editing.\n"
-    "- Web layouts must adapt at 390px, 768px and 1280px. Collapse sidebars and stack grids at narrow widths; "
+    "- Web layouts must adapt at 390px, 768px and 1280px. Start with mobile classes, then md:/lg: changes. "
+    "Collapse sidebars and stack grids at narrow widths; use min-w-0 for flex children, wrap labels, "
+    "and contain wide tables in overflow-x-auto regions. "
     "never leave text or controls outside the viewport.\n"
     "Design doctrine (from the Claude Design and Apple HIG skills):\n"
     "- Composition first. You are given this screen's surface and composition: follow them. A centered hero plus three equal "
@@ -338,7 +368,39 @@ _SCREEN_SYSTEM = (
     "bg-black/45) with light text, or in a solid panel; never put dark text straight on a photo.\n"
     "- Never use emoji characters anywhere in the page; draw icons as inline SVG.\n"
     "- Usable: text contrast at least 4.5:1, tap targets at least 44px, visible hover and focus states, clear primary action.\n"
-    "- Build the screen completely: every section a real page of this kind has, written out in full with realistic content."
+    "- Build the screen completely: every section a real page of this kind has, written out in full with realistic content. "
+    "Depth must come from useful content and behavior, not extra decoration. Dashboards need meaningful SVG charts "
+    "with axes/legends, populated tables, filters and object details. Shops need item details, cart and totals. "
+    "Marketing sites need a distinct visual story, product proof, useful pricing/FAQ and a working primary action. "
+    "Do not use empty chart rectangles, uniform card grids, placeholder headings or fake testimonials.\n"
+    "Built-in local interaction contract (the host supplies the runtime; do not reimplement these):\n"
+    "- Tabs: one container with data-design-tabs, a role=tablist, buttons role=tab with "
+    "data-design-action=tab data-design-target=#panel-id aria-controls=panel-id aria-selected=true/false. "
+    "Panels inside the same container have id, data-design-panel, role=tabpanel; put hidden on inactive panels. "
+    "Style selected tabs with aria-selected: Tailwind variants. Arrow keys work automatically.\n"
+    "- Menus/disclosure: a button with data-design-action=toggle data-design-target=#menu-id "
+    "aria-controls=menu-id aria-expanded=false; target initially has hidden. show/hide actions also work.\n"
+    "- Dialogs: use native <dialog id=details> (without hidden), opened by "
+    "data-design-action=open-dialog data-design-target=#details. Close button inside uses "
+    "data-design-action=close-dialog. Escape and focus restoration work automatically.\n"
+    "- Search: labeled input data-design-filter=#catalog. Catalog contains data-design-item elements "
+    "and an initially hidden data-design-empty empty state. Matching uses each item's text.\n"
+    "- Category filters: buttons in data-design-filters with data-design-action=filter "
+    "data-design-target=#catalog data-design-value=category (or all). Items have data-design-category. "
+    "Use aria-pressed variants for active filters. Search and category filters on the same catalog combine automatically.\n"
+    "- Forms: <form data-design-submit=#result data-design-success='Saved in this demo.'> with labeled, "
+    "required fields and a submit button. Result is an initially hidden status element with id=result. "
+    "Native validation and a success message work automatically. Real record creation needs custom script.\n"
+    "- AI demos: <form data-design-ai=#reply> with a labeled input name=prompt, submit button, and reply element. The host brokers real AI calls when its owner enables AI demo. Never call fetch or embed keys. Exports explain how to reopen in Pragna.\n"
+    "- Voice input: button data-design-dictate=#input brokers microphone permission through the host (browser support required). Voice playback: button data-design-speak=#text reads that element aloud through browser speech synthesis. Video/audio use native controls with imported asset URLs. Self-contained Canvas/WebGL animations and shaders are allowed without remote libraries or downloads.\n"
+    "- Range inputs: data-design-output=#value updates that text node. Checkbox/select controls are native.\n"
+    "- Demo-only secondary actions: data-design-action=toast data-design-message='Export prepared in this demo.' "
+    "Use this only for incidental actions. Primary flows must reveal real content or change meaningful state.\n"
+    "Every displayed control must do something specific, navigate to an existing section/view, "
+    "or be explicitly disabled with an explanation. No href=# dead ends. Keep unique IDs. "
+    "Every visible input has a label; icon buttons have aria-label. Cover validation, success and empty states."
+    " Before returning, check your composition, all interaction targets, mobile layout and requested content. "
+    "Keep markup concise: reuse the host runtime instead of verbose custom scripts or repeated decorative SVG paths."
 )
 
 _PLAN_SYSTEM = (
@@ -348,12 +410,21 @@ _PLAN_SYSTEM = (
     '"theme": {"primary": "#hex", "on_primary": "#hex", "surface": "#hex", "background": "#hex", "foreground": "#hex", '
     '"muted": "#hex", "border": "#hex", "radius": "12px", "font": "one of: ' + ", ".join(FONTS) + '"}, '
     '"photo_terms": ["2-4 word generic phrases a photo library would match for this brand, e.g. tropical modern house"], '
+    '"design_brief": {"audience": "who uses it", "goal": "primary user task", '
+    '"sections": ["specific content/views needed to satisfy this brief"], '
+    '"interactions": [{"trigger": "specific user action", "result": "visible state/data change"}], '
+    '"states": ["useful validation, success, empty and detail states"], '
+    '"responsive": "how navigation and content adapt on phone, tablet and desktop"}, '
     '"screens": [{"name": "Home", "surface": "one of: ' + ", ".join(SURFACES) + '", '
     '"purpose": "what the complete design includes and how its views interact", "composition": "one sentence: the layout, e.g. split screen, full-bleed image with overlay, asymmetric grid, editorial columns"}]}\n'
     "Return exactly one item in screens. Cover the entire brief in that design, including local navigation "
     "and interactive panels for requested app views, or sections for a website. Never propose multiple mockups. "
     "Theme rules: derive the palette from the brand and industry in the brief, never a generic purple/indigo/blue default. "
-    "Use hex colors only, keep foreground readable on background, and pick a dark theme when the brand suits it. "
+    "Use hex colors only, keep foreground and muted text at least 4.5:1 on both background and surface, "
+    "and on_primary at least 4.5:1 on primary. Pick a dark theme when the brand suits it. "
+    "Plan 4-8 meaningful sections/views and 3-6 concrete interactions when appropriate for the request. "
+    "For each interaction describe both the trigger and visible result, not just 'button works'. "
+    "Honor short briefs without padding. Use industry-specific details and a distinctive composition. "
     "Each screen must have a different surface or a clearly different composition. Surfaces: Monitor (watch state), "
     "Operate (take action), Compare (weigh options), Configure (set up), Decide/Learn (convince or teach, the only surface "
     "where a hero fits), Explore (browse a catalog or gallery), Inspect (drill into one object)."
@@ -364,12 +435,53 @@ def _planned_theme(theme) -> dict | None:
     if not isinstance(theme, dict):
         return None
     try:
-        return validate_theme(theme)
+        planned = validate_theme(theme)
     except DesignError:
         return None
+    # Correct generated text tokens before building. User-selected themes stay untouched.
+    for key, backgrounds in (
+        ('foreground', ('background', 'surface')), ('muted', ('background', 'surface')),
+        ('on_primary', ('primary',)),
+    ):
+        def minimum(color):
+            return min(contrast_ratio(color, planned[background]) for background in backgrounds)
+        if minimum(planned[key]) < 4.5:
+            channels = [int(planned[key][i:i + 2], 16) for i in (1, 3, 5)]
+            candidates = [planned[key]]
+            for step in range(1, 101):
+                for endpoint in (0, 255):
+                    color = '#' + ''.join(f'{round(c + (endpoint - c) * step / 100):02x}' for c in channels)
+                    candidates.append(color)
+                valid = next((c for c in candidates[-2:] if minimum(c) >= 4.5), None)
+                if valid:
+                    planned[key] = valid
+                    break
+            else:
+                planned[key] = max(candidates, key=minimum)
+    return planned
 
 
-async def plan_flow(settings, prompt: str, device: str, max_screens: int, existing_names: list[str]) -> dict:
+def _brief(data) -> dict:
+    """Keep useful planner detail without trusting its types or size."""
+    if not isinstance(data, dict):
+        return {}
+    def items(key):
+        value = data.get(key)
+        return [str(item).strip()[:240] for item in value if isinstance(item, str) and item.strip()][:10] if isinstance(value, list) else []
+    interactions = data.get('interactions')
+    return {
+        'audience': str(data.get('audience') or '').strip()[:240],
+        'goal': str(data.get('goal') or '').strip()[:400],
+        'sections': items('sections'), 'states': items('states'),
+        'responsive': str(data.get('responsive') or '').strip()[:500],
+        'interactions': [
+            {'trigger': str(item['trigger']).strip()[:200], 'result': str(item['result']).strip()[:300]}
+            for item in interactions if isinstance(item, dict) and item.get('trigger') and item.get('result')
+        ][:10] if isinstance(interactions, list) else [],
+    }
+
+
+async def plan_flow(settings, prompt: str, device: str, max_screens: int, existing_names: list[str], kind: str = 'prototype') -> dict:
     """Screen plan {project_name, screens}. Falls back to one screen if the model will not give valid JSON."""
     ask = (
         f"Design brief: {prompt}\nTarget: {_device_hint(device)}\n"
@@ -378,30 +490,45 @@ async def plan_flow(settings, prompt: str, device: str, max_screens: int, existi
     )
     if existing_names:
         ask += f"\nThe project already has these screens, do not repeat them: {', '.join(existing_names)}."
-    for attempt in range(2):
+    system = _PLAN_SYSTEM
+    if kind == 'presentation':
+        system = system.replace('Return exactly one item in screens.', f'Return up to {max_screens} items in screens, one per presentation slide.')
+        system = system.replace('Never propose multiple mockups.', 'Plan a coherent sequence of presentation slides, not app screens.')
+        system += '\nPresentation-specific rules override app examples: distribute the story across slides; each slide has one clear point and restrained text, no app navigation or forced interaction lists.'
+        ask = f'Create an on-brand presentation with up to {max_screens} slides. Give every slide a distinct title and concrete content.\nBrief: {prompt}'
+    elif kind == 'variants':
+        system = system.replace('Never propose multiple mockups.', 'Each alternative is a complete usable design for the same brief.')
+        system = system.replace('Return exactly one item in screens.', f'Return exactly {max_screens} items in screens, one per alternative design direction.')
+        ask = f'Plan {max_screens} complete alternative designs for the SAME content and function. Use distinct compositions; each must fulfill the full brief. Name each direction and describe its layout.\nBrief: {prompt}'
+    elif kind in {'document', 'marketing'}:
+        ask += f'\nArtifact format: {kind}. Plan readable visual content rather than unnecessary app controls.'
+    for attempt in range(1):
         try:
             data = _parse_json_object(
-                await _llm(settings, [{"role": "system", "content": _PLAN_SYSTEM}, {"role": "user", "content": ask}])
+                await _llm(settings, [{"role": "system", "content": system}, {"role": "user", "content": ask}], stage='planning')
             )
         except DesignError as exc:
             logger.warning("Design planner attempt %d failed: %s", attempt + 1, exc)
             continue
+        raw_screens = (data or {}).get('screens')
         screens = [
             {
                 "name": str(s["name"]).strip()[:60],
-                "purpose": str(s.get("purpose", "")).strip()[:300],
+                "purpose": str(s.get("purpose", "")).strip()[:1200],
                 "surface": str(s.get("surface", "")).strip()[:30],
-                "composition": str(s.get("composition", "")).strip()[:200],
+                "composition": str(s.get("composition", "")).strip()[:600],
             }
-            for s in (data or {}).get("screens", [])
+            for s in (raw_screens if isinstance(raw_screens, list) else [])
             if isinstance(s, dict) and str(s.get("name", "")).strip()
         ][:max_screens]
         if screens:
             return {
                 "project_name": str((data or {}).get("project_name") or "").strip()[:60],
-                "direction": str((data or {}).get("direction") or "").strip()[:300],
+                "direction": str((data or {}).get("direction") or "").strip()[:800],
                 "theme": _planned_theme((data or {}).get("theme")),
-                "photo_terms": [str(t).strip()[:40] for t in ((data or {}).get("photo_terms") or []) if str(t).strip()][:6],
+                "design_brief": _brief((data or {}).get('design_brief')),
+                "photo_terms": [str(t).strip()[:40] for t in ((data or {}).get("photo_terms") or []) if isinstance(t, str) and t.strip()][:6]
+                    if isinstance((data or {}).get('photo_terms'), list) else [],
                 "screens": screens,
             }
     return {
@@ -521,6 +648,20 @@ async def resolve_unsplash(body: str) -> str:
     return body
 
 
+async def finish_photography(
+    settings, body: str, context: str = '', terms: tuple[str, ...] = (), used: set[str] | None = None,
+) -> tuple[str, bool]:
+    """Best-effort photography with one shared deadline; keep any resolved photos on timeout."""
+    resolved = body
+    try:
+        async with asyncio.timeout(PHOTO_TIMEOUT_SECONDS):
+            resolved = await resolve_unsplash(body)
+            return await illustrate(settings, resolved, context, terms, used), False
+    except TimeoutError:
+        logger.info('Design photography budget reached')
+        return resolved, True
+
+
 _STORED_IMAGE = re.compile(r"/generated_images/(img_[A-Za-z0-9_]+\.(png|jpg))")
 
 
@@ -547,6 +688,10 @@ async def generate_screen_body(
     style_reference: str | None = None,
     image: str | None = None,
     direction: str = "",
+    design_brief: dict | None = None,
+    theme: dict | None = None,
+    on_partial: Callable[[str], Awaitable[None]] | None = None,
+    kind: str = 'prototype',
 ) -> str:
     context = "\n".join(f"- {s['name']}: {s['purpose']}" for s in flow)
     text = (
@@ -555,20 +700,35 @@ async def generate_screen_body(
         "Implement the full brief in this one design, including working local navigation between "
         "requested views and meaningful demo interactions. Do not output multiple page mockups."
     )
+    if kind == 'presentation':
+        text = (f"Deck brief: {prompt}\nSlide outline:\n{context}\n"
+                f"Build ONLY slide {screen['name']}: {screen['purpose']}. Use a complete 1280 by 720 composition, "
+                "large readable typography, restrained text, meaningful diagrams or data, and a consistent deck visual language. "
+                "Do not combine the other slides into this slide. Avoid webpage navigation and scrolling.")
     if screen.get("surface"):
         text += f"\nSurface: {screen['surface']}. Composition: {screen.get('composition') or 'your choice, distinct from the other screens'}."
     if direction:
         text += f"\nArt direction: {direction}"
+    if design_brief:
+        text += f"\nDesign specification (implement every requested section and trigger/result pair):\n{json.dumps(design_brief)}"
+    if theme:
+        text += f"\nActual project theme tokens (already provided by the host):\n{json.dumps(theme)}"
     if style_reference:
         text += f"\n\nKeep the same nav, components and tokens as an existing screen, but not its layout:\n```html\n{style_reference[:6000]}\n```"
     if image:
-        text += "\n\nRebuild the UI in the attached image as faithfully as you can, using the theme tokens."
+        text += "\n\nUse the attached image as visual reference while following the brief and theme tokens. Recreate its layout faithfully when the brief asks for a recreation."
         user_content: str | list = [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": image}}]
     else:
         user_content = text
-    messages = [{"role": "system", "content": _SCREEN_SYSTEM}, {"role": "user", "content": user_content}]
+    system = _SCREEN_SYSTEM
+    if kind != 'prototype':
+        system += f"\nArtifact-specific rules take precedence over generic product examples: format {kind}. "
+        system += "Build only the planned artifact; use visual content and restrained text. Do not add website navigation, app controls, pricing or other sections unless the brief asks for them."
+    if kind == 'presentation':
+        system += " Desktop slide composition is 1280x720. Keep all slide content within that height at desktop width; narrow previews may reflow accessibly."
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user_content}]
     for attempt in range(2):
-        body = parse_html_block(await _llm(settings, messages))
+        body = parse_html_block(await _llm(settings, messages, on_partial=on_partial))
         if body:
             return _checked(body)
     raise DesignError("The model did not return any HTML")
@@ -600,23 +760,35 @@ _AUDIT_TASK = (
     "indigo/violet accent; icon+heading+sentence feature-tile grid; coloured left-border accent cards; unearned blur or "
     "glass; oversized stat numbers filling space; rounded-square icon above every heading; everything centred with no "
     "real composition; flat type hierarchy; composition that does not fit the screen's surface.\n"
-    "2. If N is 2 or less, reply with the one audit line and nothing else.\n"
+    "2. Also check functionality and completeness: missing requested views, dead navigation, unwired buttons, "
+    "empty chart boxes, non-working search, missing validation/empty/success states, duplicate IDs, "
+    "script errors, inaccessible controls, fixed widths causing mobile overflow. "
+    "If N is 2 or less AND no functional/accessibility issues remain, reply with the one audit line and nothing else.\n"
     "3. Otherwise return the repaired body in one ```html block. Fix composition first (re-layout, do not just recolour), "
     "then type and colour, then remove decoration. Keep the brand, copy, theme tokens, the screen's purpose and every "
-    "photo placeholder URL. Do not add or remove sections; keep about the same length."
+    "photo placeholder URL. Keep about the same length and preserve all existing functionality, scripts, "
+    "data-design attributes, target IDs and form fields. Fix broken controls using the built-in interaction contract. "
+    "Add missing content or states required by the design specification. Do not hide overflowing content as a fix."
 )
 
 
-async def refine_screen_body(settings, body: str, screen: dict, direction: str) -> str:
+async def refine_screen_body(
+    settings, body: str, screen: dict, direction: str, design_brief: dict | None = None,
+    browser_issues: list[dict] | None = None,
+) -> str:
     """One audit-then-repair pass (Claude Design's slop diagnostic). Returns the original body when the audit
     finds it clean or the repair is unusable, so a refine can never make a screen worse by failing."""
+    original_checks = inspect_body(body)
     ask = (
         f"Screen: {screen['name']} ({screen['purpose']}). Surface: {screen.get('surface') or 'unspecified'}. "
         f"Composition asked for: {screen.get('composition') or 'unspecified'}. Art direction: {direction or 'unspecified'}.\n\n"
+        f"Design specification: {json.dumps(design_brief or {})}\n"
+        f"Source checks to repair: {json.dumps(original_checks['issues'])}\n\n"
+        f"Browser smoke-check findings to repair: {json.dumps(browser_issues or [])}\n\n"
         f"```html\n{body}\n```\n\n{_AUDIT_TASK}"
     )
     try:
-        reply = await _llm(settings, [{"role": "system", "content": _SCREEN_SYSTEM}, {"role": "user", "content": ask}])
+        reply = await _llm(settings, [{"role": "system", "content": _SCREEN_SYSTEM}, {"role": "user", "content": ask}], stage='refining')
     except DesignError as exc:
         logger.warning("Design refine skipped: %s", exc)
         return body
@@ -625,28 +797,58 @@ async def refine_screen_body(settings, body: str, screen: dict, direction: str) 
     logger.info("Design audit of %r: %s (%s)", screen["name"], audit[:200], "repaired" if repaired else "unchanged")
     if not repaired or len(repaired) < len(body) * 0.5 or len(repaired.encode("utf-8")) > MAX_BODY_BYTES:
         return body
+    repaired_checks = inspect_body(repaired)
+    original_errors = [i for i in original_checks['issues'] if i['severity'] == 'error']
+    repaired_errors = [i for i in repaired_checks['issues'] if i['severity'] == 'error']
+    if len(repaired_errors) > len(original_errors) or ({i['code'] for i in repaired_errors} - {i['code'] for i in original_errors}):
+        logger.warning('Design repair rejected: introduced broken interaction targets')
+        return body
+    if original_checks['has_custom_script'] and not repaired_checks['has_custom_script']:
+        logger.warning('Design repair rejected: removed prototype behavior')
+        return body
     return repaired
 
 
 # --- Flow generation -------------------------------------------------------
 
 async def generate_flow(
-    conn, settings, project: dict, prompt: str, image: str | None = None, add: bool = False
+    conn, settings, project: dict, prompt: str, image: str | None = None, add: bool = False,
+    polish: bool = False, variants: int = 1,
 ) -> AsyncGenerator[dict, None]:
     """Plan screens, then build them in parallel. Yields events as each finishes:
     plan -> (screen | screen_error)* -> done."""
     existing = repository.list_design_screens(conn, project["id"])
-    max_new = 1 if (add or image) else MAX_SCREENS_PER_GENERATE
-    if len(existing) + max_new > MAX_SCREENS_PER_PROJECT:
+    kind = project.get('kind') or 'prototype'
+    max_new = 1 if (add or image) else 6 if kind == 'presentation' else MAX_SCREENS_PER_GENERATE
+    if variants > 1 and kind != 'presentation' and not image:
+        max_new = min(3, variants)
+    max_new = min(max_new, MAX_SCREENS_PER_PROJECT - len(existing))
+    if max_new < 1:
         yield {"type": "error", "error": f"A project can hold at most {MAX_SCREENS_PER_PROJECT} screens"}
         return
 
+    build_image = image
+    if not build_image:
+        imported_image = conn.execute("SELECT content FROM design_sources WHERE project_id=? AND media_type LIKE ? ORDER BY id LIMIT 1", (project['id'],'image/%')).fetchone()
+        if imported_image:
+            build_image = imported_image['content']
+    model_prompt = prompt + design_context(conn, project)
+    model_prompt += {
+        'presentation': '\nCreate an individual presentation slide, not a whole website. Use a 16:9 composition at 1280x720, meaningful visuals and concise speaker-ready content. Keep content within the slide and adapt at narrow widths. No app navigation chrome or decorative fake controls.',
+        'document': '\nCreate a polished, print-friendly visual document or one-pager. Use readable editorial sections, real content and restrained typography. No decorative fake app controls.',
+        'marketing': '\nCreate a finished campaign visual, social asset or marketing collateral. Prioritize the message, a distinct composition and brand consistency. Avoid unnecessary application chrome.',
+    }.get(kind, '')
     if image:
         plan = {"project_name": "", "direction": "", "theme": None, "photo_terms": [], "screens": [{"name": "From image", "purpose": prompt or "Recreate the uploaded design"}]}
     else:
-        plan = await plan_flow(settings, prompt, project["device"], max_new, [s["name"] for s in existing])
+        if variants > 1:
+            plan = await plan_flow(settings, model_prompt, project['device'], max_new, [s['name'] for s in existing], kind='variants')
+        elif kind == 'prototype':
+            plan = await plan_flow(settings, model_prompt, project["device"], max_new, [s["name"] for s in existing])
+        else:
+            plan = await plan_flow(settings, model_prompt, project["device"], max_new, [s["name"] for s in existing], kind=kind)
 
-    if plan.get("theme") and not existing:
+    if plan.get("theme") and not existing and not project.get('design_system_id'):
         repository.update_design_project(conn, project["id"], theme=plan["theme"])
         project["theme"] = plan["theme"]  # the route renders every screen with this
 
@@ -658,25 +860,38 @@ async def generate_flow(
     screens = []
     for i, s in enumerate(plan["screens"]):
         sid = repository.create_design_screen(conn, project["id"], s["name"], start + i)
+        dimensions = {'presentation': {'width':1280,'height':720}, 'document': {'width':816,'height':1056}, 'marketing': {'width':1080,'height':1080}}.get(kind)
+        if dimensions:
+            conn.execute('INSERT INTO design_artboards (screen_id,layout) VALUES (?,?)',(sid,json.dumps(dimensions)))
+            conn.commit()
         screens.append({"id": sid, **s})
     yield {
         "type": "plan",
         "project_name": project["name"],
         "theme": project["theme"],
+        "direction": plan.get('direction', ''),
+        "design_brief": plan.get('design_brief', {}),
         "screens": [{"id": s["id"], "name": s["name"], "purpose": s["purpose"]} for s in screens],
     }
+    yield {'type': 'status', 'stage': 'building', 'message': 'Building layouts and working interactions'}
 
     style_reference = next((s["body"] for s in existing if s.get("body")), None)
     flow = plan["screens"]
     gate = asyncio.Semaphore(MAX_PARALLEL_SCREENS)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=8)
 
     async def build(screen: dict) -> dict:
+        async def partial(text: str) -> None:
+            draft = preview_body(text)
+            if draft:
+                await queue.put({'type': 'screen_draft', 'id': screen['id'], 'body': draft})
         try:
             async with gate:
                 body = await generate_screen_body(
-                    settings, prompt, project["device"], screen, flow, style_reference, image, plan.get("direction", "")
+                    settings, model_prompt, project["device"], screen, flow, style_reference, build_image, plan.get("direction", ""),
+                    design_brief=plan.get('design_brief'), theme=project['theme'], on_partial=partial,
+                    **({'kind': kind} if kind != 'prototype' else {}),
                 )
-            body = await resolve_unsplash(body)
             version_id = repository.add_screen_version(conn, screen["id"], body, prompt)
             return {"type": "screen", "id": screen["id"], "version_id": version_id, "body": body}
         except DesignError as exc:
@@ -685,20 +900,48 @@ async def generate_flow(
             logger.exception("Design screen %s failed", screen["id"])
             return {"type": "screen_error", "id": screen["id"], "error": f"Unexpected error: {exc}"}
 
-    queue: asyncio.Queue = asyncio.Queue()
     used_photos: set[str] = set()  # shared by every screen of this generation
 
     async def finish(built: dict, screen: dict) -> None:
         """After a screen is on the canvas: repair its design, then swap placeholders for pictures.
         Each step that changes the body is saved in place and streamed as an updated screen."""
         async def refine(body: str) -> str:
-            async with gate:  # an LLM call like the first build; pictures are limited by their own gate instead
-                return await refine_screen_body(settings, body, screen, plan.get("direction", ""))
+            await queue.put({'type': 'status', 'stage': 'refining', 'id': built['id'], 'message': 'Checking content, controls and responsive layouts'})
+            report = await design_browser_checks.check_document(
+                render_document(body, project['theme'], 0, interactive=False), project['device'],
+            )
+            # Clean prototypes finish with checks, rather than always paying for a second full rewrite.
+            source_issues = inspect_body(body, project['theme'])['issues']
+            repaired = body
+            if polish or report['issues'] or source_issues:
+                async with gate:
+                    repaired = await refine_screen_body(
+                        settings, body, screen, plan.get("direction", ""), plan.get('design_brief'), report['issues'],
+                    )
+            if repaired != body:
+                updated_report = await design_browser_checks.check_document(
+                    render_document(repaired, project['theme'], 0, interactive=False), project['device'],
+                )
+                new_failures = {i['code'] for i in updated_report['issues']} - {i['code'] for i in report['issues']}
+                if report['status'] == 'checked' and (updated_report['status'] != 'checked' or new_failures or len(updated_report['issues']) > len(report['issues'])):
+                    logger.warning('Design repair rejected: browser checks regressed')
+                    repaired = body
+                    updated_report = report
+                report = updated_report
+            await queue.put({'type': 'quality', 'id': built['id'], 'version_id': built['version_id'], 'browser': report})
+            return repaired
 
         async def picture(body: str) -> str:
-            return await illustrate(
-                settings, body, f"{prompt[:200]}. {plan.get('direction', '')}", tuple(plan.get("photo_terms") or ()), used_photos
+            if not _PLACEHOLDER.search(body) and not _UNSPLASH.search(body):
+                return body
+            await queue.put({'type': 'status', 'stage': 'images', 'id': built['id'], 'message': 'Adding final photography and visual details'})
+            # Photos never delay the initial screen, and cannot hold the editor busy for minutes.
+            resolved, timed_out = await finish_photography(
+                settings, body, f"{prompt[:200]}. {plan.get('direction', '')}", tuple(plan.get("photo_terms") or ()), used_photos,
             )
+            if timed_out:
+                await queue.put({'type': 'notice', 'message': 'Photography timed out. Your design is saved; some image slots may remain unfilled.'})
+            return resolved
 
         try:
             for step in (refine, picture):
@@ -707,34 +950,35 @@ async def generate_flow(
                     repository.update_screen_version_body(conn, built["version_id"], body)
                     built = {**built, "body": body}
                     await queue.put(built)
+            report = await design_browser_checks.check_document(
+                render_document(built['body'], project['theme'], 0, interactive=False), project['device'],
+            )
+            await queue.put({'type': 'quality', 'id': built['id'], 'version_id': built['version_id'], 'browser': report})
         except Exception:
             logger.exception("Design finishing for screen %s failed", built["id"])
-        finally:
-            await queue.put(None)
 
-    by_id = {s["id"]: s for s in screens}
-    tasks = [asyncio.create_task(build(s)) for s in screens]
-    finishing: list[asyncio.Task] = []
-    ended = 0  # finishing tasks that have put their closing None on the queue
+    async def produce(screen: dict) -> None:
+        try:
+            built = await build(screen)
+            await queue.put(built)
+            if built['type'] == 'screen':
+                await finish(built, screen)
+        finally:
+            # Cancellation must not block trying to write to an abandoned full queue.
+            if not asyncio.current_task().cancelling():
+                await queue.put(None)
+
+    tasks = [asyncio.create_task(produce(s)) for s in screens]
+    ended = 0
     try:
-        for finished in asyncio.as_completed(tasks):
-            event = await finished
-            yield event
-            if event["type"] == "screen":
-                finishing.append(asyncio.create_task(finish(event, by_id[event["id"]])))
-            while not queue.empty():  # stream repaired screens as soon as they exist
-                item = queue.get_nowait()
-                if item is None:
-                    ended += 1
-                else:
-                    yield item
-        while ended < len(finishing):
+        while ended < len(tasks):
             item = await queue.get()
             if item is None:
                 ended += 1
             else:
                 yield item
     finally:
-        for task in tasks + finishing:
+        for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     yield {"type": "done"}

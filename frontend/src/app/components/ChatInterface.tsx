@@ -726,6 +726,13 @@ export default function ChatInterface() {
                   pendingCitations = data.citations;
                 }
                 if (typeof data.status === 'string' && !streamedAny) showStatus(data.status);
+                if (typeof data.model === 'string') {
+                  const answerModel = data.model;
+                  setConversations(prev => prev.map(c => c.id !== convId ? c : {
+                    ...c,
+                    messages: c.messages.map(m => m.id !== assistantMessageId ? m : { ...m, model: answerModel }),
+                  }));
+                }
               } catch {
                 // Ignore chunk parse error
               }

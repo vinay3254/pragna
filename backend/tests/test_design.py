@@ -20,7 +20,7 @@ def fake_llm(plan_screens=("Home", "Cart"), broken=()):
     """Stands in for OmniRoute: planner gets JSON, screen calls get an html block (or prose for `broken`)."""
     calls = []
 
-    async def llm(settings, messages):
+    async def llm(settings, messages, **kwargs):
         calls.append(messages)
         if messages[0]["content"] == design_service._PLAN_SYSTEM:
             return json.dumps({
@@ -97,7 +97,7 @@ def test_version_add_restore_and_prune(tmp_path, monkeypatch):
 # --- planner / editor ------------------------------------------------------
 
 async def test_plan_flow_falls_back_to_one_screen(monkeypatch):
-    async def bad(settings, messages):
+    async def bad(settings, messages, **kwargs):
         return "not json at all"
 
     monkeypatch.setattr(design_service, "_llm", bad)
@@ -183,7 +183,7 @@ def test_generate_applies_planned_theme_and_ignores_invalid(client, monkeypatch)
     brand = {"primary": "#c2410c", "on_primary": "#ffffff", "surface": "#1c1917", "background": "#0c0a09",
              "foreground": "#fafaf9", "muted": "#a8a29e", "border": "#292524", "radius": "4px", "font": "Playfair Display"}
 
-    async def llm(settings, messages):
+    async def llm(settings, messages, **kwargs):
         if messages[0]["content"] == design_service._PLAN_SYSTEM:
             theme = brand if "ramen" in messages[-1]["content"] else {"primary": "red; }</style><script>"}
             return json.dumps({"project_name": "P", "theme": theme, "screens": [{"name": "Home", "purpose": "x"}]})
@@ -216,7 +216,7 @@ def test_edit_versions_restore_and_theme_rerender(client, monkeypatch):
     screen = client.get(f"/api/design/projects/{project_id}").json()["screens"][0]
     first_version = screen["version_id"]
 
-    async def edited(settings, messages):
+    async def edited(settings, messages, **kwargs):
         return "```html\n<main>edited</main>\n```"
 
     monkeypatch.setattr(design_service, "_llm", edited)
@@ -238,7 +238,7 @@ def test_edit_failure_keeps_current_version(client, monkeypatch):
     client.post(f"/api/design/projects/{project_id}/generate", json={"prompt": "app"})
     screen = client.get(f"/api/design/projects/{project_id}").json()["screens"][0]
 
-    async def down(settings, messages):
+    async def down(settings, messages, **kwargs):
         raise DesignError("The model could not be reached: boom")
 
     monkeypatch.setattr(design_service, "_llm", down)
@@ -439,7 +439,7 @@ def refine_llm(audit_reply):
     """Planner and first build as fake_llm; the audit call gets audit_reply."""
     inner = fake_llm(plan_screens=("Home",))
 
-    async def llm(settings, messages):
+    async def llm(settings, messages, **kwargs):
         user = messages[-1]["content"]
         if isinstance(user, str) and "Audit this screen" in user:
             return audit_reply
@@ -453,7 +453,7 @@ def test_refine_streams_a_repaired_screen_in_place(client, monkeypatch):
     monkeypatch.setattr(design_service, "_llm", refine_llm(f"Audit: 6/10. Tells: feature-tile grid.\n```html\n{repaired}\n```"))
     project_id = client.post("/api/design/projects", json={}).json()["project"]["id"]
 
-    events = sse_events(client.post(f"/api/design/projects/{project_id}/generate", json={"prompt": "app"}))
+    events = sse_events(client.post(f"/api/design/projects/{project_id}/generate", json={"prompt": "app", "polish": True}))
 
     screens = [e for e in events if e["type"] == "screen"]
     assert len(screens) == 2 and screens[0]["id"] == screens[1]["id"]  # first build, then the repair of the same screen
@@ -472,7 +472,7 @@ def test_refine_leaves_the_screen_alone_when_the_repair_is_clean_or_unusable(cli
     monkeypatch.setattr(design_service, "_llm", refine_llm(reply))
     project_id = client.post("/api/design/projects", json={}).json()["project"]["id"]
 
-    events = sse_events(client.post(f"/api/design/projects/{project_id}/generate", json={"prompt": "app"}))
+    events = sse_events(client.post(f"/api/design/projects/{project_id}/generate", json={"prompt": "app", "polish": True}))
 
     assert len([e for e in events if e["type"] == "screen"]) == 1
     assert "built" in client.get(f"/api/design/projects/{project_id}").json()["screens"][0]["body"]

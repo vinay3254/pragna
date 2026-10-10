@@ -36,6 +36,8 @@ from app.routes import (
     browser,
     billing,
     design,
+    design_workspace,
+    design_exports,
 )
 
 # Populates os.environ from backend/.env -- needed because a few keys
@@ -127,6 +129,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     fastapi_app.include_router(browser.router)
     fastapi_app.include_router(billing.router)
     fastapi_app.include_router(design.router)
+    fastapi_app.include_router(design_workspace.router)
+    fastapi_app.include_router(design_exports.router)
     return fastapi_app
 
 
