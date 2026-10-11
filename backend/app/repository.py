@@ -814,21 +814,33 @@ def create_design_project(conn, user_id: int, name: str, device: str, theme: dic
 def _project_row(row) -> dict:
     project = dict(row)
     project["theme"] = json.loads(project["theme"])
+    project['kind'] = project.get('kind') or 'prototype'
+    project['settings'] = json.loads(project.get('settings') or '{}')
     return project
 
 
 def get_design_project(conn, user_id: int, project_id: int) -> dict | None:
     row = conn.execute(
-        "SELECT id, name, device, theme, created_at, updated_at FROM design_projects WHERE id = ? AND user_id = ?",
-        (project_id, user_id),
+        """SELECT p.id,p.name,p.device,p.theme,p.created_at,p.updated_at,p.user_id AS owner_id,
+        o.kind,o.design_system_id,o.settings,
+        CASE WHEN p.user_id=? THEN 'owner' ELSE m.role END AS access_role
+        FROM design_projects p LEFT JOIN design_project_options o ON o.project_id=p.id
+        LEFT JOIN design_members m ON m.project_id=p.id AND m.user_id=?
+        WHERE p.id=? AND (p.user_id=? OR m.user_id IS NOT NULL)""",
+        (user_id, user_id, project_id, user_id),
     ).fetchone()
     return _project_row(row) if row else None
 
 
 def list_design_projects(conn, user_id: int) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, name, device, theme, created_at, updated_at FROM design_projects WHERE user_id = ? ORDER BY updated_at DESC",
-        (user_id,),
+        """SELECT p.id,p.name,p.device,p.theme,p.created_at,p.updated_at,p.user_id AS owner_id,
+        o.kind,o.design_system_id,o.settings,
+        CASE WHEN p.user_id=? THEN 'owner' ELSE m.role END AS access_role
+        FROM design_projects p LEFT JOIN design_project_options o ON o.project_id=p.id
+        LEFT JOIN design_members m ON m.project_id=p.id AND m.user_id=?
+        WHERE p.user_id=? OR m.user_id IS NOT NULL ORDER BY p.updated_at DESC""",
+        (user_id, user_id, user_id),
     ).fetchall()
     return [_project_row(r) for r in rows]
 
@@ -845,6 +857,9 @@ def update_design_project(conn, project_id: int, name: str | None = None, theme:
 def delete_design_project(conn, project_id: int) -> None:
     for screen in list_design_screens(conn, project_id):
         _delete_screen_rows(conn, screen["id"])
+    conn.execute('DELETE FROM design_message_authors WHERE message_id IN (SELECT id FROM design_messages WHERE project_id=?)', (project_id,))
+    for table in ('design_comments', 'design_sources', 'design_shares', 'design_members', 'design_project_options'):
+        conn.execute(f'DELETE FROM {table} WHERE project_id=?', (project_id,))
     conn.execute("DELETE FROM design_messages WHERE project_id = ?", (project_id,))
     conn.execute("DELETE FROM design_projects WHERE id = ?", (project_id,))
     conn.commit()
@@ -874,7 +889,11 @@ def list_design_screens(conn, project_id: int) -> list[dict]:
         """,
         (project_id,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    screens = [dict(r) for r in rows]
+    for screen in screens:
+        layout = conn.execute('SELECT layout FROM design_artboards WHERE screen_id=?', (screen['id'],)).fetchone()
+        screen['layout'] = json.loads(layout['layout']) if layout else {}
+    return screens
 
 
 def get_design_screen(conn, user_id: int, screen_id: int) -> dict | None:
@@ -885,11 +904,17 @@ def get_design_screen(conn, user_id: int, screen_id: int) -> dict | None:
         FROM design_screens s
         JOIN design_projects p ON p.id = s.project_id
         LEFT JOIN design_screen_versions v ON v.id = s.current_version_id
-        WHERE s.id = ? AND p.user_id = ?
+        WHERE s.id = ? AND (p.user_id = ? OR EXISTS (
+          SELECT 1 FROM design_members m WHERE m.project_id=p.id AND m.user_id=?))
         """,
-        (screen_id, user_id),
+        (screen_id, user_id, user_id),
     ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    screen = dict(row)
+    layout = conn.execute('SELECT layout FROM design_artboards WHERE screen_id=?', (screen_id,)).fetchone()
+    screen['layout'] = json.loads(layout['layout']) if layout else {}
+    return screen
 
 
 def update_screen_version_body(conn, version_id: int, body: str) -> None:
@@ -937,6 +962,8 @@ def restore_screen_version(conn, screen_id: int, version_id: int) -> bool:
 
 
 def _delete_screen_rows(conn, screen_id: int) -> None:
+    conn.execute('DELETE FROM design_comments WHERE screen_id=?', (screen_id,))
+    conn.execute('DELETE FROM design_artboards WHERE screen_id=?', (screen_id,))
     conn.execute("UPDATE design_screens SET current_version_id = NULL WHERE id = ?", (screen_id,))
     conn.execute("DELETE FROM design_screen_versions WHERE screen_id = ?", (screen_id,))
     conn.execute("DELETE FROM design_screens WHERE id = ?", (screen_id,))
@@ -947,11 +974,13 @@ def delete_design_screen(conn, screen_id: int) -> None:
     conn.commit()
 
 
-def add_design_message(conn, project_id: int, role: str, content: str) -> int:
+def add_design_message(conn, project_id: int, role: str, content: str, user_id: int | None = None) -> int:
     cur = conn.execute(
         "INSERT INTO design_messages (project_id, role, content, created_at) VALUES (?, ?, ?, ?)",
         (project_id, role, content, _now()),
     )
+    if user_id:
+        conn.execute('INSERT INTO design_message_authors (message_id,user_id) VALUES (?,?)', (cur.lastrowid,user_id))
     conn.execute("UPDATE design_projects SET updated_at = ? WHERE id = ?", (_now(), project_id))
     conn.commit()
     return cur.lastrowid
@@ -959,6 +988,8 @@ def add_design_message(conn, project_id: int, role: str, content: str) -> int:
 
 def list_design_messages(conn, project_id: int) -> list[dict]:
     return [dict(row) for row in conn.execute(
-        "SELECT id, role, content, created_at FROM design_messages WHERE project_id = ? ORDER BY id",
+        """SELECT m.id,m.role,m.content,m.created_at,a.user_id AS author_id,u.name AS author_name
+        FROM design_messages m LEFT JOIN design_message_authors a ON a.message_id=m.id
+        LEFT JOIN users u ON u.id=a.user_id WHERE m.project_id=? ORDER BY m.id""",
         (project_id,),
     ).fetchall()]

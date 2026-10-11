@@ -979,6 +979,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
                 const toolCalls = await streamWithTools(res);
                 if (!toolCalls || toolCalls.length === 0) {
                   streamedSuccess = true;
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ model: omniModel })}\n\n`));
                   console.log(`[Chat API] answered by OmniRoute (${omniModel})`);
                   generateMentionedDocument(assistantResponseText);
                   break;
@@ -1058,6 +1059,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
             const { text, toolCalls } = await streamOllama(res);
             if (toolCalls.length === 0) {
               streamedSuccess = true;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ model: targetModel })}\n\n`));
               console.log(`[Chat API] answered by Ollama (${targetModel})`);
               generateMentionedDocument(text);
               break;
@@ -1091,11 +1093,12 @@ CRITICAL MANDATORY INSTRUCTIONS:
 
 
           if (!streamedSuccess) {
-            sendText(`\n\n*(Error: could not get a response from Ollama or Omniroute${lastError ? `: ${lastError}` : ''}.)*\n`);
+            console.error('[Chat API] No provider returned a response:', lastError || 'Unknown error');
+            sendText('\n\n*(Error: Server unavailable. Please try again shortly.)*\n');
           }
         } catch (err: any) {
           console.error('Agent loop error:', err);
-          sendText(`\n\n*(Error: ${err.message || 'Unknown error'})*\n`);
+          sendText('\n\n*(Error: Server unavailable. Please try again shortly.)*\n');
         } finally {
           if (autoSearch?.success && !autoSearch.results.some(source => assistantResponseText.includes(source.url))) {
             sendText(sourceLinks(autoSearch));

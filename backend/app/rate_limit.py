@@ -9,6 +9,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 WINDOW_SECONDS = 60
 DEFAULT_LIMIT = 60
 AUTH_LIMIT = 10
+DESIGN_LIMIT = 240
+DESIGN_AI_LIMIT = 20
 AUTH_PREFIX = "/api/auth"
 EXEMPT_PATHS = {"/api/health"}
 
@@ -60,6 +62,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         is_auth_path = path.startswith(AUTH_PREFIX)
         limit = AUTH_LIMIT if is_auth_path else DEFAULT_LIMIT
         bucket = "auth" if is_auth_path else "api"
+        # Canvas saves, collaboration polls and imports create more requests than chat.
+        # Give model calls a separate smaller bucket; preserve the other app limits.
+        if path.startswith('/api/design/'):
+            ai = request.method == 'POST' and path.rsplit('/',1)[-1] in {'generate','edit','regenerate','assistant'}
+            limit = DESIGN_AI_LIMIT if ai else DESIGN_LIMIT
+            bucket = 'design-ai' if ai else 'design'
         key = f"{bucket}:{_client_key(request)}"
 
         allowed, retry_after = self._check(key, limit)

@@ -7,6 +7,26 @@ from app.config import Settings
 
 
 @respx.mock
+async def test_openai_stream_accepts_usage_frames_without_choices():
+    frames = [{'choices': [], 'usage': {'total_tokens': 2}},
+              {'choices': [{'delta': {'content': '<main>Ready</main>'}}]},
+              {'choices': [], 'usage': {'total_tokens': 8}}]
+    body = ''.join('data: ' + json.dumps(frame) + '\n\n' for frame in frames) + 'data: [DONE]\n\n'
+    respx.post('http://gateway/v1/chat/completions').mock(return_value=httpx.Response(200, text=body))
+    tokens = [token async for token in chat_stream([], 'model', 'http://gateway')]
+    assert tokens == ['<main>Ready</main>']
+
+
+@respx.mock
+async def test_openai_stream_reports_gateway_errors_instead_of_empty_success():
+    respx.post('http://gateway/v1/chat/completions').mock(return_value=httpx.Response(200,
+        text='data: {"error":{"message":"Provider unavailable"}}\n\n'))
+    with pytest.raises(RuntimeError, match='streaming error'):
+        async for _ in chat_stream([], 'model', 'http://gateway'):
+            pass
+
+
+@respx.mock
 async def test_chat_stream_yields_content_tokens():
     lines = [
         json.dumps({"message": {"role": "assistant", "content": "Hel"}, "done": False}),

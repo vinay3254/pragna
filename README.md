@@ -268,10 +268,28 @@ pragna/
 
 The workspace pairs a persistent design conversation with a zoomable canvas. Start with a brief, paste or drop a reference image, or use a starter idea. The project gallery fetches previews only when their cards are visible.
 
+Open **Project tools** (the wrench) for the native workspace features:
+
+- **Brands**: private design-system library with editable colors/fonts, brand rules, reusable HTML patterns, multiple brands and a default for new projects. Import CSS variables and conventions from source files or code ZIPs.
+- **Sources**: import screenshots, PDFs, DOCX, PPTX, XLSX, SVG, text, source code and audio/video files (20 MB each; 20 references per project). Capture public website HTML or a selected element. Imports never execute uploaded scripts; screenshot references also reach the builder as an image.
+- **Canvas**: layers, instant text/style edits, live previews, Alt-drag positioning, corner resizing, duplication, grouping, flipping, ordering and version-based undo/redo. Set artboard size and canvas position; duplicate an artboard or save the whole project as an exploration.
+- **Directions and formats**: choose one fast direction or two/three alternatives. Presentation projects plan up to six slides; documents and marketing assets use dedicated briefs and artboard dimensions. Present completed artboards using arrow keys and Escape.
+- **Comments and collaboration**: anchor comments to selected elements, resolve/reopen them, or apply them through AI. Owners grant registered accounts viewer, commenter or editor roles. Shared conversations show authors; active workspaces poll for changes every eight seconds. This is persisted collaboration, without live cursors or simultaneous text editing.
+- **Share**: revocable view-only preview links work without login. Public previews omit conversations, comments and source documents. Private access stays restricted to owner and granted accounts.
+- **Export**: HTML, ZIP, PNG, rendered multi-page PDF, PowerPoint with editable text over rendered artwork, and a coding handoff bundle containing source HTML, tokens, local Tailwind and HANDOFF.md. Chromium is required for PDF/PPTX; install it with `python -m playwright install chromium`. The backend Docker image bundles Chromium and the pinned Tailwind dependency.
+- **Advanced prototypes**: native video/audio controls, self-contained Canvas/WebGL/shader scripts, browser voice input/playback, and host-brokered AI forms. Owners enable **AI demo** in Preview before model calls run. Microphone access depends on browser support and user permission. Exports explain which host services require reopening in Pragna.
+
+Canva and Google Slides can import the exported PPTX. Direct partner publishing, connected-account OAuth, live coding-agent sync, enterprise administration and full native editing of every exported visual object are not implemented. Handoff bundles provide files and implementation instructions; they do not automatically change another repository.
+
+Feature reference: [Claude Design's official guide](https://support.claude.com/en/articles/14604416-get-started-with-claude-design). Pragna implements its own native workflows rather than using Claude's private APIs.
+
+
 - **Canvas**: select an element for a targeted change, use the hand tool to pan, or fit and focus screens. Shortcuts: `V` to select, `H` to pan, `0` to fit, and `+` / `-` to zoom.
 - **Conversation**: follow-up messages refine the current design by default. Add a screen explicitly when needed; projects with several screens can also apply an edit to the entire design. Generation shows elapsed time and can be stopped without losing finished work. Follow-up edits include recent conversation context.
 - **Inspect**: edit a single text element instantly, without a model call. Each change creates a restorable version; stale selections cannot overwrite a newer design.
 - **Preview**: explore a screen at desktop, tablet, or mobile widths. Inputs and local prototype interactions work here; named links open matching project screens. New designs can include local tabs, filters, menus, and dialogs.
+- **Design direction**: generation plans the audience, primary task, content sections, interaction trigger/result pairs, states, and responsive behavior. The workspace shows the plan and each generation stage; assistant replies support formatted text and tables.
+- **Design checks**: review missing interaction targets, duplicate IDs, unlabeled controls, and theme contrast. When Chromium is installed, isolated browser smoke checks also detect script errors, horizontal overflow at 390/768/1280px, and sample up to six visible buttons. Findings feed the repair pass and remain available through a repair action. These are smoke checks, not full application verification; external services are blocked during checks. Browser reports use a bounded in-memory cache and are unavailable after a server restart until the design is checked again.
 - **Theme and history**: apply a palette, typography, and corner radius across screens, or restore an earlier screen version. Theme writes are serialized to preserve the latest choice.
 - **Export**: download one screen as HTML or PNG, or all completed screens as a ZIP containing linked HTML files and design tokens. Exported HTML uses Tailwind and Google Fonts CDNs.
 
@@ -279,27 +297,31 @@ The editor shares Pragna’s gold palette and light/dark appearance preference. 
 
 **How a generation runs**
 
-1. A planner call picks a project name, art direction, a brand theme (colours, font), generic photo search terms, and exactly one complete design. It chooses a surface (Monitor, Operate, Compare, Configure, Decide/Learn, Explore, Inspect) and a composition for the brief.
-2. The design is written as one Tailwind HTML body with local prototype interactions, using the theme tokens. The server owns everything around the body, so changing the theme re-renders it with no model call. The completed design opens directly in Preview. Additional screens can be added explicitly; existing projects retain their screens.
-3. A second pass audits each screen against ten common AI-design flaws and repairs it in place.
-4. A third pass fills photo slots, trying in order: Codex image generation, a public-domain or CC0 photo from Wikimedia Commons, then Gemini image. Slots that stay empty are drawn in the theme colours.
+1. A planner call picks a project name, art direction, a brand theme (colours, font), generic photo search terms, and one complete design by default (or requested alternatives / presentation slides). It chooses a surface (Monitor, Operate, Compare, Configure, Decide/Learn, Explore, Inspect), a composition, and a detailed content/interaction specification. Generated text tokens are adjusted for readable contrast before building.
+2. The design streams onto the canvas as HTML arrives, with model scripts removed from incomplete drafts. Drafts are not saved as versions or available for editing/export. The finished body is saved immediately, before photography. A shared local runtime handles declarative tabs (including keyboard navigation), disclosures, dialogs with focus restoration, search, category filters, validated forms, range output, and incidental demo feedback. Custom inline JavaScript handles domain logic such as cart totals or calculations. The runtime is included in standalone HTML exports.
+3. Source checks and available browser smoke checks run after the first screen appears. A second AI pass runs only for findings from those checks, or when **Extra design polish** is selected. Repairs that add broken targets, remove prototype behavior, or regress browser findings are rejected. The repair call has a 60-second budget and preserves the first version on failure.
+4. Photography is deferred until after the first saved screen. Photo resolution and filling share a 30-second budget; unfilled slots retain theme colours and a notice explains the timeout. Sources remain Codex, public-domain or CC0 Wikimedia Commons, then Gemini image.
 
 **Configuration** (`backend/app/design_service.py`)
 
 | Setting | Value |
 | :--- | :--- |
-| `DESIGN_MODEL` | `antigravity/gemini-3.7-flash-high` through OmniRoute |
-| `DESIGN_MAX_TOKENS` | `65536`, the model's output ceiling |
+| `DESIGN_MODEL` (environment override) | `antigravity/gemini-3.7-flash-medium` through OmniRoute |
+| `DESIGN_PLAN_MODEL` (environment override) | `antigravity/gemini-3.7-flash-low`, 2,048-token planning budget |
+| `DESIGN_FALLBACK_MODEL` (environment override) | `ollama-cloud/gemma4:31b`; set empty to disable |
+| `DESIGN_MAX_TOKENS` | `24576`, the page output budget |
 | `IMAGE_SOURCES` | Codex terra, Codex luna, Wikimedia Commons, Gemini image |
 
 OmniRoute is reached with `OMNIROUTE_BASE_URL` and `OMNIROUTE_API_KEY` in `backend/.env`.
 
 **Things to know**
 
-- A page from the high-reasoning model takes minutes. The frontend proxy (`proxyTimeout` in `frontend/next.config.mjs`) must stay longer than a generation, or the stream is cut and the model call cancelled.
+- Planning has a 25-second total budget and falls back to a minimal plan if unavailable. Models that produce no content within 10 seconds (planning) or 20 seconds (building) switch to the configured fallback. An unavailable provider is skipped for 90 seconds so page construction does not repeat the planner's wait. Failover occurs only before content begins; partial output from different models is never mixed. No model provider availability is guaranteed.
+- SSE heartbeats keep the proxy connection alive during planning; draft events are throttled and queue size is bounded. Stopping cancels model and finishing tasks while retaining completed versions. The frontend proxy (`proxyTimeout` in `frontend/next.config.mjs`) must stay longer than a generation.
 - The in-app preview loads a pinned Tailwind copy from `frontend/public/vendor/`. Exported HTML uses the Tailwind CDN link and embeds its pictures, so it works on its own.
 - Image providers rate limit. A provider that answers 429 or 502 is skipped for 60 seconds. Codex is used for pictures only, never for text.
 - Tests: `cd backend && .venv/bin/python -m pytest tests/test_design.py -q`.
+- Browser checks and interaction tests: install Chromium with `cd backend && .venv/bin/python -m playwright install chromium`, then run `.venv/bin/python -m pytest tests/test_design.py tests/test_design_workspace.py tests/test_design_runtime.py tests/test_design_features.py -q`. Generation remains available without Chromium; the UI identifies source-only checks.
 
 ---
 

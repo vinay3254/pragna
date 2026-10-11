@@ -100,7 +100,11 @@ async def chat_stream(
                                     break
                                 try:
                                     data = json.loads(chunk)
-                                    content = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                    if data.get('error'):
+                                        raise RuntimeError('The model gateway returned a streaming error')
+                                    # Usage and keep-alive frames can have no choices.
+                                    choices = data.get('choices') or []
+                                    content = choices[0].get("delta", {}).get("content", "") if choices else ''
                                     if content:
                                         yield content
                                 except json.JSONDecodeError:

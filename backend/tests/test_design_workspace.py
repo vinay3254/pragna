@@ -82,7 +82,7 @@ def test_empty_project_cannot_export(client):
 
 def test_generation_and_edits_persist_conversation(client, monkeypatch):
     calls = []
-    async def llm(settings, messages):
+    async def llm(settings, messages, **kwargs):
         calls.append(messages)
         if messages[0]['content'] == design_service._PLAN_SYSTEM:
             return json.dumps({'project_name': 'Example', 'screens': [{'name': 'Home', 'purpose': 'An overview'}]})

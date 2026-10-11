@@ -25,3 +25,14 @@ def test_health_check_is_exempt(test_settings):
         for _ in range(15):
             res = c.get("/api/health")
             assert res.status_code == 200
+
+
+def test_workspace_requests_have_separate_model_budget(client):
+    for _ in range(70):
+        assert client.get('/api/design/projects').status_code == 200
+    for _ in range(20):
+        assert client.post('/api/design/screens/999999/assistant', json={'prompt':'Example'}).status_code == 404
+    blocked = client.post('/api/design/screens/999999/assistant', json={'prompt':'Example'})
+    assert blocked.status_code == 429 and 'Retry-After' in blocked.headers
+    assert client.get('/api/design/projects').status_code == 200
+    assert client.get('/api/auth/me').status_code == 200

@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Design browser checks and rendered PDF/PowerPoint exports.
+RUN python -m playwright install --with-deps chromium
+
 # Copy app code
 COPY . .
 

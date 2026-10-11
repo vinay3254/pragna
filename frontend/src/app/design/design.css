@@ -72,6 +72,50 @@
 .design-message {
   animation: design-appear 0.2s ease-out;
 }
+.design-response > * + * {
+  margin-top: 0.75rem;
+}
+.design-response :is(h1, h2, h3) {
+  font-weight: 600;
+  font-size: 1.05em;
+}
+.design-response :is(ul, ol) {
+  padding-left: 1.25rem;
+}
+.design-response ul {
+  list-style: disc;
+}
+.design-response ol {
+  list-style: decimal;
+}
+.design-response li + li {
+  margin-top: 0.35rem;
+}
+.design-response pre {
+  overflow-x: auto;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  background: var(--muted);
+}
+.design-response :not(pre) > code {
+  padding: 0.1rem 0.25rem;
+  border-radius: 0.25rem;
+  background: var(--muted);
+}
+.design-response a {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.design-response table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.design-response :is(th, td) {
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  text-align: left;
+}
 @media (max-width: 767px) {
   :where(.design-icon-button) {
     min-width: 44px;

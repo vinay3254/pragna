@@ -15,7 +15,12 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   const [showSplash, setShowSplash] = useState<boolean | null>(null);
 
   useEffect(() => {
-    if (pathname === '/auth/callback' || pathname === '/reset-password' || pathname.startsWith('/share/')) {
+    if (
+      pathname === '/auth/callback' ||
+      pathname === '/reset-password' ||
+      pathname.startsWith('/share/') ||
+      pathname.startsWith('/design/shared/')
+    ) {
       setShowSplash(false);
       return;
     }
@@ -55,7 +60,12 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
 
   // Authentication callbacks, password resets, and public share links must be
   // accessible without an account.
-  if (pathname === '/auth/callback' || pathname === '/reset-password' || pathname.startsWith('/share/')) {
+  if (
+    pathname === '/auth/callback' ||
+    pathname === '/reset-password' ||
+    pathname.startsWith('/share/') ||
+    pathname.startsWith('/design/shared/')
+  ) {
     return <>{children}</>;
   }
 
