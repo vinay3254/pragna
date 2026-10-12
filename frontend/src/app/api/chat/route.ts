@@ -262,9 +262,9 @@ function getOmnirouteKey(): string {
   return process.env.OMNIROUTE_API_KEY || '';
 }
 
-const OMNIROUTE_CHAT_MODEL = 'antigravity/gemini-3.7-flash-high';
-// Gemini 3.7 flash always thinks 4-6s before its first word; 2.5 flash starts in about 2s.
-const OMNIROUTE_QUICK_MODEL = 'antigravity/gemini-2.5-flash';
+const OMNIROUTE_CHAT_MODEL = 'antigravity/claude-opus-4-6-thinking';
+// Sonnet answers short messages faster and is the first fallback when Opus fails.
+const OMNIROUTE_QUICK_MODEL = 'antigravity/claude-sonnet-4-6';
 
 function isQuickMessage(text: string): boolean {
   return text.length <= 280
@@ -971,7 +971,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
                 }
                 if (res && !res.ok && omniModel !== 'auto/best-free') {
                   console.warn(`[Chat API] OmniRoute ${omniModel} returned ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
-                  omniModel = 'auto/best-free';
+                  omniModel = omniModel === OMNIROUTE_QUICK_MODEL ? 'auto/best-free' : OMNIROUTE_QUICK_MODEL;
                   try { res = await post(omniModel); } catch {}
                 }
                 if (!res || !res.ok) break;

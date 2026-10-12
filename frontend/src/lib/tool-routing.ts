@@ -61,6 +61,7 @@ const TOOL_INTENTS: RegExp[] = [
   // files and documents
   /\b(read|open|write to|save to|create|edit|delete)\b.*\b(file|folder|directory)\b/i,
   /\b(pdf|docx|word document|excel|spreadsheet|xlsx|pptx|powerpoint|slide deck)\b/i,
+  /\b(create|make|generate|write|draft|prepare|build|give me|gimme|need)\b.*\b(document|doc|report|presentation|slides|deck|ppt)\b/i,
   // web
   EXPLICIT_SEARCH,
   URL,

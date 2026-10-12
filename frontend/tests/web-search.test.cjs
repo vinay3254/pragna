@@ -76,6 +76,8 @@ test('completed searches avoid a redundant tool round while other actions still 
   assert.equal(needsTools('Search online for the latest release', true), false);
   assert.equal(needsTools('Search online for the latest release'), true);
   assert.equal(needsTools('Search online and create a PDF report', true), true);
+  assert.equal(needsTools('i need to give a presentation on chatgpt, can u gimme a document explaining it'), true);
+  assert.equal(needsTools('what is a presentation'), false);
 });
 
 let searchResult;
