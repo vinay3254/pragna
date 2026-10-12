@@ -306,8 +306,8 @@ The editor shares Pragna’s gold palette and light/dark appearance preference. 
 
 | Setting | Value |
 | :--- | :--- |
-| `DESIGN_MODEL` (environment override) | `antigravity/gemini-3.7-flash-medium` through OmniRoute |
-| `DESIGN_PLAN_MODEL` (environment override) | `antigravity/gemini-3.7-flash-low`, 2,048-token planning budget |
+| `DESIGN_MODEL` (environment override) | `antigravity/gemini-3.8-flash-tiered` through OmniRoute |
+| `DESIGN_PLAN_MODEL` (environment override) | `antigravity/gemini-3.8-flash-tiered`, 2,048-token planning budget |
 | `DESIGN_FALLBACK_MODEL` (environment override) | `ollama-cloud/gemma4:31b`; set empty to disable |
 | `DESIGN_MAX_TOKENS` | `24576`, the page output budget |
 | `IMAGE_SOURCES` | Codex terra, Codex luna, Wikimedia Commons, Gemini image |

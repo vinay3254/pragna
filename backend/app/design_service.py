@@ -28,10 +28,13 @@ logger = logging.getLogger(__name__)
 
 STOCK = "stock"
 # Codex is used for pictures only. Planning needs less reasoning than page construction.
-DESIGN_MODEL = "antigravity/gemini-3.7-flash-medium"
-PLAN_MODEL = "antigravity/gemini-3.7-flash-low"
+DESIGN_MODEL = "antigravity/gemini-3.8-flash-tiered"
+PLAN_MODEL = "antigravity/gemini-3.8-flash-tiered"
 DESIGN_MAX_TOKENS = 24576
 PLAN_MAX_TOKENS = 2048
+# Gemini 3.8 thinks for minutes before its first token at the default level, which
+# trips FIRST_TOKEN_TIMEOUT_SECONDS. Low effort answers in seconds with no thinking.
+GEMINI_38_REASONING_EFFORT = "low"
 PLAN_TIMEOUT_SECONDS = 25
 REFINE_TIMEOUT_SECONDS = 60
 PHOTO_TIMEOUT_SECONDS = 30
@@ -209,6 +212,7 @@ async def _llm(
             async with aclosing(chat_stream(
                 messages, candidate, settings.omniroute_base_url, api_keys=[settings.omniroute_api_key],
                 max_tokens=max_tokens or (PLAN_MAX_TOKENS if planning else DESIGN_MAX_TOKENS),
+                reasoning_effort=GEMINI_38_REASONING_EFFORT if 'gemini-3.8' in candidate else None,
             )) as stream:
                 try:
                     first_token = await asyncio.wait_for(anext(stream), 10 if planning else FIRST_TOKEN_TIMEOUT_SECONDS)

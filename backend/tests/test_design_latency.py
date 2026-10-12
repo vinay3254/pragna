@@ -47,6 +47,21 @@ async def test_llm_never_mixes_models_after_output_begins(monkeypatch):
     assert calls == ['primary/page']
 
 
+async def test_llm_asks_gemini_38_for_low_reasoning_only(monkeypatch):
+    efforts = {}
+    async def stream(messages, model, url, **kwargs):
+        efforts[model] = kwargs.get('reasoning_effort')
+        if model.startswith('antigravity/'):
+            raise RuntimeError('unavailable')
+        yield '<main>Working</main>'
+    monkeypatch.setattr(design, 'chat_stream', stream)
+    monkeypatch.setattr(design, '_model_blocked_until', {})
+    config = settings()
+    config.design_model, config.design_fallback_model = 'antigravity/gemini-3.8-flash-tiered', 'backup/page'
+    assert await design._llm(config, []) == '<main>Working</main>'
+    assert efforts == {'antigravity/gemini-3.8-flash-tiered': 'low', 'backup/page': None}
+
+
 def test_preview_removes_incomplete_scripts_and_event_handlers():
     text = '```html\n<main><h1 onclick="alert(1)">Studio</h1><a href="javascript:alert(1)">Link</a><script>throw Error("partial")'
     draft = design.preview_body(text)

@@ -63,6 +63,7 @@ async def chat_stream(
     ollama_url: str,
     api_keys: list[str] | None = None,
     max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
 ) -> AsyncGenerator[str, None]:
     ollama_url = _normalize_url(ollama_url)
     keys_to_try = key_rotator.get_ordered_keys(api_keys)
@@ -80,6 +81,8 @@ async def chat_stream(
                     body = {"model": model, "messages": messages, "stream": True}
                     if max_tokens:
                         body["max_tokens"] = max_tokens
+                    if reasoning_effort:
+                        body["reasoning_effort"] = reasoning_effort
                 else:
                     endpoint = f"{ollama_url}/api/chat"
                     body = {"model": model, "messages": messages, "stream": True}
