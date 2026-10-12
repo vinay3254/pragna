@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # Balanced design defaults; deployments can opt back into high reasoning.
     design_model: str = "antigravity/gemini-3.8-flash-tiered"
     design_plan_model: str = "antigravity/gemini-3.8-flash-tiered"
-    design_fallback_model: str = "ollama-cloud/gemma4:31b"
+    design_fallback_model: str = ""
     ollama_local_url: str = "http://localhost:11434"
     ollama_local_model: str = "gemma3"
     embed_model: str = "nomic-embed-text"

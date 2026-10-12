@@ -262,20 +262,9 @@ function getOmnirouteKey(): string {
   return process.env.OMNIROUTE_API_KEY || '';
 }
 
-const OMNIROUTE_CHAT_MODEL = 'antigravity/claude-opus-4-6-thinking';
-// Sonnet answers short messages faster and is the first fallback when Opus fails.
-const OMNIROUTE_QUICK_MODEL = 'antigravity/claude-sonnet-4-6';
-
-function isQuickMessage(text: string): boolean {
-  return text.length <= 280
-    && !/```|\b(code|function|bug|debug|error|step by step|in detail|compare|essay|analy[sz]e|write|plan|design|calculate|prove)\b/i.test(text)
-    && !needsTools(text, false);
-}
-
-function mapOmnirouteModel(model: string, lastUserMessage = ''): string {
-  if (model?.startsWith('antigravity/')) return model;
-  return isQuickMessage(lastUserMessage) ? OMNIROUTE_QUICK_MODEL : OMNIROUTE_CHAT_MODEL;
-}
+// Gemini 3.8 Flash serves every OmniRoute chat. Low effort skips its slow default thinking.
+const OMNIROUTE_CHAT_MODEL = 'antigravity/gemini-3.8-flash-tiered';
+const OMNIROUTE_REASONING_EFFORT = 'low';
 
 function getBackendOllamaKeys(): string[] {
   const keys: string[] = [];
@@ -558,7 +547,7 @@ export async function POST(req: NextRequest) {
     const modelConfig = getModelConfig(model) || getModelConfig(targetModel);
     const modelDisplayName = modelConfig?.displayName || (model.includes('/') ? model.split('/')[1] : model);
     const modelScript = modelConfig?.sanskritScript ? ` (${modelConfig.sanskritScript})` : '';
-    const modelRaw = getOmnirouteKey() && !hasImages ? mapOmnirouteModel(model, lastUserMessage) : targetModel; // the model actually serving this request
+    const modelRaw = getOmnirouteKey() && !hasImages ? OMNIROUTE_CHAT_MODEL : targetModel; // the model actually serving this request
     const modelMeaning = modelConfig?.meaning ? ` — meaning "${modelConfig.meaning}"` : '';
     const modelDesc = modelConfig?.description ? ` (${modelConfig.description})` : '';
 
@@ -945,7 +934,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
           if (omniKey && !hasImages) {
             try {
               const omniUrl = `${(process.env.OMNIROUTE_BASE_URL || 'http://127.0.0.1:20128').replace(/\/+$/, '')}/v1/chat/completions`;
-              let omniModel = toolsEnabled ? OMNIROUTE_CHAT_MODEL : mapOmnirouteModel(model, lastUserMessage);
+              const omniModel = OMNIROUTE_CHAT_MODEL;
               for (let round = 0; round < MAX_ROUNDS; round++) {
                 // The last round runs without tools so the model has to write a final answer.
                 const withTools = toolsEnabled && round < MAX_ROUNDS - 1;
@@ -958,7 +947,8 @@ CRITICAL MANDATORY INSTRUCTIONS:
                       messages: toOpenAIMessages(conversationHistory),
                       ...(withTools ? { tools: fullToolsSchema, tool_choice: 'auto' } : {}),
                       temperature,
-                      max_tokens: 8192, // thinking tokens share this budget with the answer
+                      max_tokens: 8192,
+                      reasoning_effort: OMNIROUTE_REASONING_EFFORT,
                       stream: true,
                     }),
                     signal: AbortSignal.timeout(90000),
@@ -969,10 +959,8 @@ CRITICAL MANDATORY INSTRUCTIONS:
                 } catch (netErr: any) {
                   console.warn('Omniroute request failed:', netErr.message);
                 }
-                if (res && !res.ok && omniModel !== 'auto/best-free') {
+                if (res && !res.ok) {
                   console.warn(`[Chat API] OmniRoute ${omniModel} returned ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
-                  omniModel = omniModel === OMNIROUTE_QUICK_MODEL ? 'auto/best-free' : OMNIROUTE_QUICK_MODEL;
-                  try { res = await post(omniModel); } catch {}
                 }
                 if (!res || !res.ok) break;
 
