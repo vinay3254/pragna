@@ -143,6 +143,7 @@ export default function DesignCanvasPage() {
   currentArtboard.current = activeId;
   const viewportRef = useRef<HTMLDivElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const exportRef = useRef<HTMLDivElement>(null);
@@ -248,9 +249,15 @@ export default function DesignCanvasPage() {
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
-    const observer = new ResizeObserver(() =>
-      setViewportSize({ width: el.clientWidth, height: el.clientHeight })
-    );
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const { width, height } = entry.contentRect;
+      setViewportSize((prev) => {
+        if (Math.abs(prev.width - width) < 4 && Math.abs(prev.height - height) < 4) return prev;
+        return { width: Math.round(width), height: Math.round(height) };
+      });
+    });
     observer.observe(el);
     return () => observer.disconnect();
   }, [loading]);
@@ -311,7 +318,12 @@ export default function DesignCanvasPage() {
     return () => document.removeEventListener('pointerdown', close);
   }, [exportOpen]);
   useEffect(() => {
-    chatEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTo({
+        top: chatScrollRef.current.scrollHeight,
+        behavior: 'smooth',
+      });
+    }
   }, [messages.length, operation, sideTab]);
   useEffect(() => {
     if (!busy) return;
@@ -342,12 +354,13 @@ export default function DesignCanvasPage() {
         setScreens(detail.screens);
         setMessages(detail.messages ?? []);
         savedTheme.current = detail.project.theme;
-        const first = detail.screens.find((s) => s.body);
-        setActiveId(first?.id ?? null);
+        const first = detail.screens.find((s) => s.body && s.version_id !== null);
+        const hasCompletedScreen = Boolean(first);
+        setActiveId(first?.id ?? detail.screens[0]?.id ?? null);
         setScope(first ? 'screen' : 'add');
         setPreviewWidth(DEVICE_FRAME[detail.project.device].width);
-        setMode(first ? 'preview' : 'canvas');
-        if (window.innerWidth < 768 && first) {
+        setMode(hasCompletedScreen ? 'preview' : 'canvas');
+        if (window.innerWidth < 768 && hasCompletedScreen) {
           setChatOpen(false);
           setMode('preview');
           setPreviewWidth(390);
@@ -587,7 +600,7 @@ export default function DesignCanvasPage() {
     } else if (event.type === 'notice') {
       toast.info(event.message);
     } else if (event.type === 'screen_draft') {
-      // Drafts are visible, but only completed versions can be edited or exported.
+      // Drafts update canvas without triggering preview mode switches
       setScreens((previous) =>
         previous.map((screen) =>
           screen.id === event.id && screen.version_id === null
@@ -596,10 +609,6 @@ export default function DesignCanvasPage() {
         )
       );
       setActiveId((id) => id ?? event.id);
-      if (previewGeneratedDesign.current) {
-        setMode('preview');
-        previewGeneratedDesign.current = false;
-      }
     } else if (event.type === 'screen') {
       setRuntimeErrors((previous) => ({ ...previous, [event.id]: [] }));
       if (previewGeneratedDesign.current) {
@@ -1327,7 +1336,7 @@ export default function DesignCanvasPage() {
   const previewScale = clamp((viewportSize.width - 32) / previewWidth, 0.1, 1);
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full w-full max-w-full flex-col overflow-hidden">
       <header className="flex h-[60px] shrink-0 items-center gap-2 border-b border-border bg-background px-3 sm:px-5">
         <Link
           href="/design"
@@ -1533,10 +1542,10 @@ export default function DesignCanvasPage() {
           </div>
         </div>
       </header>
-      <div className="relative flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1 w-full max-w-full overflow-hidden">
         {chatOpen && (
           <aside
-            className="absolute inset-y-0 left-0 z-20 flex w-[320px] max-w-[90vw] shrink-0 flex-col border-r border-border bg-background shadow-xl md:static md:w-[310px] md:shadow-none xl:w-[340px]"
+            className="absolute inset-y-0 left-0 z-20 flex w-[320px] min-w-[320px] max-w-[90vw] shrink-0 flex-col border-r border-border bg-background shadow-xl md:static md:w-[310px] md:min-w-[310px] md:shadow-none xl:w-[340px] xl:min-w-[340px]"
             aria-label="Design conversation"
           >
             <div
@@ -1571,7 +1580,7 @@ export default function DesignCanvasPage() {
               </button>
             </div>
             {sideTab === 'chat' ? (
-              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6" role="tabpanel">
+              <div ref={chatScrollRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-6" role="tabpanel">
                 <div className="mb-6">
                   <div className="mb-3 flex items-center gap-2 text-xs font-medium">
                     <span className="text-primary">
@@ -1892,7 +1901,7 @@ export default function DesignCanvasPage() {
             </div>
           </aside>
         )}
-        <div className="relative flex min-w-0 flex-1 flex-col">
+        <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-3">
             {!chatOpen && (
               <button
@@ -2162,31 +2171,55 @@ export default function DesignCanvasPage() {
                     </button>
                   </div>
                 )}
-                <div className="absolute inset-0 overflow-auto">
-                  <div
-                    className="relative mx-auto my-4"
-                    style={{
-                      width: previewWidth * previewScale,
-                      height: frame.height * previewScale,
-                    }}
-                  >
-                    <iframe
-                      key={activeScreen.id}
-                      ref={(el) => registerFrame(activeScreen.id, el)}
-                      onLoad={() => sendMode(activeScreen.id)}
-                      title={`${activeScreen.name} interactive preview`}
-                      srcDoc={activeScreen.html}
-                      sandbox="allow-scripts allow-forms"
-                      className="absolute left-0 top-0 rounded-lg border border-border bg-card shadow-xl"
+                {activeScreen.version_id !== null && activeScreen.html ? (
+                  <div className="absolute inset-0 overflow-auto">
+                    <div
+                      className="relative mx-auto my-4 overflow-hidden rounded-lg shadow-xl"
                       style={{
-                        width: previewWidth,
-                        height: frame.height,
-                        transform: `scale(${Math.max(0.1, previewScale)})`,
-                        transformOrigin: 'top left',
+                        width: Math.round(previewWidth * previewScale),
+                        height: Math.round(frame.height * previewScale),
                       }}
-                    />
+                    >
+                      <iframe
+                        key={activeScreen.id}
+                        ref={(el) => registerFrame(activeScreen.id, el)}
+                        onLoad={() => sendMode(activeScreen.id)}
+                        title={`${activeScreen.name} interactive preview`}
+                        srcDoc={activeScreen.html}
+                        sandbox="allow-scripts allow-forms"
+                        className="absolute left-0 top-0 rounded-lg border border-border bg-card shadow-xl"
+                        style={{
+                          width: previewWidth,
+                          height: frame.height,
+                          transform: `scale(${Math.max(0.1, previewScale)})`,
+                          transformOrigin: 'top left',
+                        }}
+                      />
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+                    <Loader2 size={30} className="animate-spin text-primary" />
+                    <p className="text-base font-medium">
+                      {building.has(activeScreen.id)
+                        ? `Designing ${activeScreen.name}…`
+                        : `${activeScreen.name} is waiting to be built`}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {building.has(activeScreen.id)
+                        ? 'Your preview will appear here as soon as generation completes.'
+                        : 'Switch to Canvas to build this screen.'}
+                    </p>
+                    {!building.has(activeScreen.id) && (
+                      <button
+                        onClick={() => setMode('canvas')}
+                        className="mt-2 rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground"
+                      >
+                        Switch to Canvas
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="pointer-events-none absolute inset-x-0 bottom-4 text-center text-[10px] text-muted-foreground">
                   {previewWidth}px viewport · Scroll and interact with your design
                 </div>

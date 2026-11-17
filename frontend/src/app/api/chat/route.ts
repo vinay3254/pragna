@@ -547,7 +547,7 @@ export async function POST(req: NextRequest) {
     const modelConfig = getModelConfig(model) || getModelConfig(targetModel);
     const modelDisplayName = modelConfig?.displayName || (model.includes('/') ? model.split('/')[1] : model);
     const modelScript = modelConfig?.sanskritScript ? ` (${modelConfig.sanskritScript})` : '';
-    const modelRaw = getOmnirouteKey() && !hasImages ? OMNIROUTE_CHAT_MODEL : targetModel; // the model actually serving this request
+    const modelRaw = getOmnirouteKey() ? OMNIROUTE_CHAT_MODEL : targetModel; // the model actually serving this request
     const modelMeaning = modelConfig?.meaning ? ` — meaning "${modelConfig.meaning}"` : '';
     const modelDesc = modelConfig?.description ? ` (${modelConfig.description})` : '';
 
@@ -931,7 +931,7 @@ CRITICAL MANDATORY INSTRUCTIONS:
 
           // 1. OmniRoute Gateway (Primary) — routes to best coding model
           const omniKey = getOmnirouteKey();
-          if (omniKey && !hasImages) {
+          if (omniKey) {
             try {
               const omniUrl = `${(process.env.OMNIROUTE_BASE_URL || 'http://127.0.0.1:20128').replace(/\/+$/, '')}/v1/chat/completions`;
               const omniModel = OMNIROUTE_CHAT_MODEL;

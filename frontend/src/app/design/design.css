@@ -2,8 +2,13 @@
   --design-canvas: var(--background);
   --design-sidebar: var(--sidebar-bg);
   --design-selected: var(--sidebar-active);
+  position: fixed;
+  inset: 0;
   height: 100dvh;
-  overflow: hidden;
+  width: 100vw;
+  max-width: 100vw;
+  overflow: hidden !important;
+  overflow-x: hidden !important;
   color: var(--foreground);
   background: var(--background);
   font-size: 14px;

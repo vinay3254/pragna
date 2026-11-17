@@ -1,5 +1,5 @@
 'use client';
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useChat } from '@/context/ChatContext';
 
 export function useDesignAppearance() {
@@ -9,6 +9,17 @@ export function useDesignAppearance() {
 
 export function DesignAppearance({ children }: { children: React.ReactNode }) {
   const { dark } = useDesignAppearance();
+
+  useEffect(() => {
+    const lockScroll = () => {
+      if (window.scrollX !== 0) {
+        window.scrollTo(0, window.scrollY);
+      }
+    };
+    window.addEventListener('scroll', lockScroll, { passive: true });
+    return () => window.removeEventListener('scroll', lockScroll);
+  }, []);
+
   return (
     <div className="design-studio" data-appearance={dark ? 'dark' : 'light'}>
       {children}

@@ -1861,14 +1861,15 @@ export async function executeTool(name: string, args: Record<string, any>, authT
         const requestedModel = args.model;
         const modelsToTry: string[] = [];
         let omniFailure = '';
-        // Codex first for now (Gemini keeps hanging); a model picked in Image Studio is tried instead.
         if (requestedModel) {
           modelsToTry.push(requestedModel);
-          if (requestedModel.includes('gemini')) modelsToTry.push('codex/gpt-5.6-terra', 'codex/gpt-5.6-luna');
+          if (!requestedModel.includes('gemini') && Date.now() >= geminiQuotaBlockedUntil) {
+            modelsToTry.push('antigravity/gemini-3.1-flash-image');
+          }
         } else {
-          // Codex (ChatGPT plan) is used for images only.
-          modelsToTry.push('codex/gpt-5.6-terra', 'codex/gpt-5.6-luna');
+          // Primary: Gemini 3.1 Flash Image (fast, native multimodal generation in OmniRoute)
           if (Date.now() >= geminiQuotaBlockedUntil) modelsToTry.push('antigravity/gemini-3.1-flash-image');
+          modelsToTry.push('codex/gpt-5.6-terra', 'codex/gpt-5.6-luna');
         }
 
         {
@@ -2541,11 +2542,11 @@ export async function imageToImage(opts: {
     };
   };
 
-  // 1. OmniRoute edits endpoint, served by Codex (image use only).
+  // 1. OmniRoute edits endpoint (antigravity/gemini-3.1-flash-image supports native image editing).
   const omniKey = process.env.OMNIROUTE_API_KEY;
   const omniUrl = (process.env.OMNIROUTE_BASE_URL || 'http://127.0.0.1:20128').replace(/\/+$/, '');
   if (omniKey) {
-    const models = (process.env.OMNIROUTE_IMAGE_EDIT_MODELS || 'codex/gpt-5.6-terra,codex/gpt-5.6-luna')
+    const models = (process.env.OMNIROUTE_IMAGE_EDIT_MODELS || 'antigravity/gemini-3.1-flash-image,codex/gpt-5.6-terra')
       .split(',')
       .map((m) => m.trim())
       .filter(Boolean);
@@ -2559,7 +2560,7 @@ export async function imageToImage(opts: {
           method: 'POST',
           headers: { Authorization: `Bearer ${omniKey}` },
           body: form,
-          signal: AbortSignal.timeout(120000),
+          signal: AbortSignal.timeout(45000),
         });
         if (res.ok) {
           const data = await res.json();

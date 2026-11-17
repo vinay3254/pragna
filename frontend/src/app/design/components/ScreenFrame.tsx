@@ -169,7 +169,7 @@ export default function ScreenFrame({
         style={{ width, height, background }}
         className={`relative overflow-hidden rounded-xl border shadow-[0_8px_32px_rgb(0_0_0_/_7%)] ${active ? 'border-primary ring-[3px] ring-gold-500/20' : 'border-border'}`}
       >
-        {built ? (
+        {built && !building ? (
           <iframe
             ref={(el) => registerFrame(screen.id, el)}
             title={screen.name}
